@@ -7,7 +7,7 @@ import { base64urlToBytes, bytesToBase64url } from './crypto.js';
 const state = {
   identityId: null,
   identityKeyBytes: null,
-  profile: null, // { v, id, name, bio, devices: [{pk, name}] }
+  profile: null // { v, id, name, bio, devices: [{pk, name, did}] }
 };
 
 export function getIdentityId() {
@@ -26,7 +26,7 @@ export function setProfile(p) {
   state.profile = p;
 }
 
-// internal: normalize devices array into [{pk,name}, ...]
+// normalize devices[] into [{pk, name, did}, ...]
 function normalizeDevices() {
   if (!state.profile) return;
   if (!Array.isArray(state.profile.devices)) {
@@ -35,17 +35,23 @@ function normalizeDevices() {
   }
   const devs = state.profile.devices;
   for (let i = 0; i < devs.length; i++) {
-    if (typeof devs[i] === 'string') {
-      devs[i] = { pk: devs[i], name: '' };
-    } else if (!devs[i] || typeof devs[i].pk !== 'string') {
-      devs[i] = { pk: String(devs[i]?.pk || ''), name: devs[i]?.name || '' };
+    const d = devs[i];
+    if (typeof d === 'string') {
+      devs[i] = { pk: d, name: '', did: null };
+    } else if (d && typeof d === 'object') {
+      devs[i] = {
+        pk: String(d.pk || ''),
+        name: d.name || '',
+        did: d.did || null
+      };
+    } else {
+      devs[i] = { pk: '', name: '', did: null };
     }
   }
 }
 
-// ensure profile object matches current identityId,
-// and ensure devices[] is a sane array
-export function ensureProfile(devicePk) {
+// ensure profile object matches current identityId, plus device entry
+export function ensureProfile(devicePk, deviceDid) {
   if (!state.identityId) return null;
 
   if (!state.profile || state.profile.id !== state.identityId) {
@@ -59,17 +65,31 @@ export function ensureProfile(devicePk) {
   }
 
   normalizeDevices();
-  ensureDeviceEntry(devicePk);
+  ensureDeviceEntry(devicePk, deviceDid);
   return state.profile;
 }
 
-export function ensureDeviceEntry(devicePk) {
+export function ensureDeviceEntry(devicePk, deviceDid) {
   if (!state.profile) return;
   normalizeDevices();
   const devs = state.profile.devices;
-  const existing = devs.find(d => d.pk === devicePk);
+
+  let existing = devs.find(d => d.pk === devicePk);
   if (!existing) {
-    devs.push({ pk: devicePk, name: '' });
+    existing = { pk: devicePk, name: '', did: deviceDid || null };
+    devs.push(existing);
+  } else {
+    if (deviceDid && !existing.did) {
+      existing.did = deviceDid;
+    }
+  }
+}
+
+export function updateDeviceDid(devicePk, deviceDid) {
+  if (!state.profile || !Array.isArray(state.profile.devices)) return;
+  const dev = state.profile.devices.find(d => d.pk === devicePk);
+  if (dev) {
+    dev.did = deviceDid;
   }
 }
 
@@ -146,7 +166,7 @@ export function getLocalProfileKey() {
 
 // read from cache (if any) into profile, fix devices, ensure device entry
 
-export function loadProfileFromCache(devicePk) {
+export function loadProfileFromCache(devicePk, deviceDid) {
   const key = getLocalProfileKey();
   if (!key) return null;
   const raw = localStorage.getItem(key);
@@ -157,7 +177,7 @@ export function loadProfileFromCache(devicePk) {
   try {
     const profile = JSON.parse(raw);
     state.profile = profile;
-    ensureProfile(devicePk);
+    ensureProfile(devicePk, deviceDid);
     return state.profile;
   } catch {
     state.profile = null;
@@ -170,7 +190,5 @@ export function saveProfileToCache() {
   if (!key || !state.profile) return;
   localStorage.setItem(key, JSON.stringify(state.profile));
 }
-
-// helpers exported for other modules
 
 export { base64urlToBytes, bytesToBase64url };

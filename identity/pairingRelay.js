@@ -1,7 +1,7 @@
 // pairingRelay.js
 // Nostr relay for device pairing: pair-request + pair-accept.
 
-import { bytesToBase64url } from './identityState.js'; // re-exported from crypto
+import { bytesToBase64url } from './identityState.js';
 
 const RELAY_URL = 'wss://relay.snort.social';
 const PAIR_REQUEST_KIND = 30031;
@@ -28,7 +28,6 @@ export function createPairingRelay({
     ws.onopen = () => {
       connected = true;
 
-      // always listen for pair-accepts addressed to this device
       ws.send(JSON.stringify([
         'REQ',
         'pair-accepts',
@@ -100,8 +99,8 @@ export function createPairingRelay({
   async function handlePairAcceptEvent(evt) {
     const pairTag = evt.tags.find(t => t[0] === 'pair');
     const pTag    = evt.tags.find(t => t[0] === 'p');
-    const targetPk  = pTag && pTag[1];
     const pairingId = pairTag && pairTag[1];
+    const targetPk  = pTag && pTag[1];
     if (!pairingId || !targetPk) return;
     if (targetPk !== device.pk) return;
 

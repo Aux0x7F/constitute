@@ -1,21 +1,19 @@
 // identityApp.js
 // Orchestrates UI, identity state, identity relay, and pairing relay.
 
-import { getOrCreateDeviceIdentity } from './deviceIdentity.js';
+import { getOrCreateDeviceIdentity, upgradeDeviceDidWithWebAuthn } from './deviceIdentity.js';
 import {
   getIdentityId,
   getIdentityKeyBytes,
-  setIdentityFromBytes,
-  setIdentityFromB64,
-  createNewIdentity,
-  persistAssociation,
-  loadAssociationFromLocal,
-  loadAssociationFromHash,
   getProfile,
   setProfile,
   ensureProfile,
   loadProfileFromCache,
   saveProfileToCache,
+  createNewIdentity,
+  persistAssociation,
+  loadAssociationFromLocal,
+  loadAssociationFromHash,
   bytesToBase64url
 } from './identityState.js';
 import { createIdentityRelay } from './identityRelay.js';
@@ -39,6 +37,9 @@ export function initIdentityApp() {
   const homeView        = document.getElementById('homeView');
   const settingsView    = document.getElementById('settingsView');
 
+  const onboardSecurityStatus = document.getElementById('onboardSecurityStatus');
+  const btnOnboardSecure      = document.getElementById('btnOnboardSecureDevice');
+
   const btnCreateOwner  = document.getElementById('btnCreateOwner');
   const ownerNameInput  = document.getElementById('ownerNameSearch');
   const btnRequestPair  = document.getElementById('btnRequestPair');
@@ -50,6 +51,8 @@ export function initIdentityApp() {
   const copyLinkBtn     = document.getElementById('copyLink');
 
   const devicePkEl      = document.getElementById('devicePk');
+  const deviceDidEl     = document.getElementById('deviceDid');
+  const btnUpgradeDid   = document.getElementById('btnUpgradeDid');
   const deviceNameEl    = document.getElementById('deviceName');
   const devicesListEl   = document.getElementById('devicesList');
   const pairRequestsEl  = document.getElementById('pairRequests');
@@ -62,8 +65,30 @@ export function initIdentityApp() {
   const device = getOrCreateDeviceIdentity();
   devicePkEl.textContent = device.pk;
 
+  function refreshSecurityUI() {
+    const isHw = device.didMethod === 'webauthn';
+
+    // onboard security text
+    if (isHw) {
+      onboardSecurityStatus.textContent = 'platform-backed key (recommended)';
+      onboardSecurityStatus.classList.remove('danger');
+    } else {
+      onboardSecurityStatus.textContent = 'software key only (upgrade strongly recommended)';
+      onboardSecurityStatus.classList.add('danger');
+    }
+
+    // device DID display
+    deviceDidEl.textContent = device.did || '(no DID)';
+    deviceDidEl.classList.toggle('device-did-soft', !isHw);
+    deviceDidEl.classList.toggle('device-did-hw', !!isHw);
+
+    // hide upgrade button if already hardware-backed
+    btnUpgradeDid.style.display = isHw ? 'none' : 'inline-block';
+  }
+
+  refreshSecurityUI();
+
   // pane / activity switching
-  let activeActivity = 'home'; // 'home' | 'settings'
   function showOnboarding() {
     onboardView.classList.remove('hidden');
     homeView.classList.add('hidden');
@@ -76,7 +101,6 @@ export function initIdentityApp() {
     homeView.classList.toggle('hidden', activity !== 'home');
     settingsView.classList.toggle('hidden', activity !== 'settings');
     btnMenu.style.display = 'inline-block';
-    activeActivity = activity;
     panePathEl.textContent = activity === 'home' ? 'Home' : 'Home / Settings';
   }
 
@@ -100,6 +124,16 @@ export function initIdentityApp() {
 
   // profile rendering
 
+  function updateIdentityUrlInUI() {
+    const id = getIdentityId();
+    const keyBytes = getIdentityKeyBytes();
+    if (!id || !keyBytes) return;
+    const keyParam = bytesToBase64url(keyBytes);
+    const base = `${window.location.origin}${window.location.pathname}`;
+    const link = `${base}#id=${encodeURIComponent(id)}&k=${encodeURIComponent(keyParam)}`;
+    identityUrlEl.value = link;
+  }
+
   function renderProfile() {
     const profile = getProfile();
     if (!profile) {
@@ -118,23 +152,26 @@ export function initIdentityApp() {
       devicesListEl.textContent = '(none recorded yet)';
     } else {
       devicesListEl.innerHTML = devices
-        .map(d => d.name ? `${d.name} (${d.pk})` : d.pk)
+        .map(d => {
+          const isLocal = d.pk === device.pk;
+          const labelName = d.name ? `${d.name} ` : '';
+          const pkPart    = d.pk ? `pk=${d.pk}` : '';
+          const didPart   = d.did ? `, did=${d.did}` : '';
+          const localTag  = isLocal ? ' [this device]' : '';
+          return `${labelName}(${pkPart}${didPart})${localTag}`;
+        })
         .join('<br>');
     }
 
     const me = devices.find(d => d.pk === device.pk);
     deviceNameEl.value = me && me.name ? me.name : '';
-    updateIdentityUrlInUI();
-  }
+    if (me && me.did && device.did !== me.did) {
+      // prefer profile DID if different (e.g., updated from another session)
+      device.did = me.did;
+      refreshSecurityUI();
+    }
 
-  function updateIdentityUrlInUI() {
-    const id = getIdentityId();
-    const keyBytes = getIdentityKeyBytes();
-    if (!id || !keyBytes) return;
-    const keyParam = bytesToBase64url(keyBytes);
-    const base = `${window.location.origin}${window.location.pathname}`;
-    const link = `${base}#id=${encodeURIComponent(id)}&k=${encodeURIComponent(keyParam)}`;
-    identityUrlEl.value = link;
+    updateIdentityUrlInUI();
   }
 
   copyLinkBtn.addEventListener('click', async () => {
@@ -172,13 +209,11 @@ export function initIdentityApp() {
       pendingRequests.set(pairingId, { code, devicePk });
       addPairRequestToUI(pairingId, code, devicePk);
     },
-    onPairingComplete: ({ identityId, identityKeyB64, pairingId }) => {
+    onPairingComplete: ({ identityId, identityKeyB64 }) => {
       // accept pairing; set identity + profile
-      setIdentityFromB64(identityId, identityKeyB64);
-      persistAssociation();
-      // reset profile so we re-sync
+      loadAssociationFromHash(`#id=${encodeURIComponent(identityId)}&k=${encodeURIComponent(identityKeyB64)}`);
       setProfile(null);
-      loadProfileFromCache(device.pk);
+      loadProfileFromCache(device.pk, device.did);
       startWithOwnerIdentity();
       currentPairingId = null;
       currentPairingCode = null;
@@ -187,47 +222,46 @@ export function initIdentityApp() {
   });
 
   function addPairRequestToUI(pairingId, code, devicePk) {
-  const div = document.createElement('div');
-  div.className = 'pair-request';
-  div.dataset.pairingId = pairingId;
-  div.innerHTML = `
-    <div><span class="pill">device</span> ${devicePk}</div>
-    <div>code: <strong>${code}</strong></div>
-    <div style="margin-top:4px; display:flex; gap:6px;">
-      <button type="button" class="approve-btn">approve</button>
-      <button type="button" class="ignore-btn">✕ ignore</button>
-    </div>
-  `;
+    const div = document.createElement('div');
+    div.className = 'pair-request';
+    div.dataset.pairingId = pairingId;
+    div.innerHTML = `
+      <div><span class="pill">device</span> ${devicePk}</div>
+      <div>code: <strong>${code}</strong></div>
+      <div style="margin-top:4px; display:flex; gap:6px;">
+        <button type="button" class="approve-btn">approve</button>
+        <button type="button" class="ignore-btn">✕ ignore</button>
+      </div>
+    `;
 
-  const approveBtn = div.querySelector('.approve-btn');
-  const ignoreBtn  = div.querySelector('.ignore-btn');
+    const approveBtn = div.querySelector('.approve-btn');
+    const ignoreBtn  = div.querySelector('.ignore-btn');
 
-  approveBtn.addEventListener('click', () => {
-    const id = getIdentityId();
-    const keyBytes = getIdentityKeyBytes();
-    pairingRelay.approvePairRequest(
-      pairingId,
-      devicePk,
-      code,
-      id,
-      keyBytes
-    ).then(() => {
+    approveBtn.addEventListener('click', () => {
+      const id = getIdentityId();
+      const keyBytes = getIdentityKeyBytes();
+      pairingRelay.approvePairRequest(
+        pairingId,
+        devicePk,
+        code,
+        id,
+        keyBytes
+      ).then(() => {
+        const el = pairRequestsEl.querySelector(`[data-pairing-id="${pairingId}"]`);
+        if (el) el.remove();
+        pendingRequests.delete(pairingId);
+      }).catch(console.error);
+    });
+
+    ignoreBtn.addEventListener('click', () => {
       const el = pairRequestsEl.querySelector(`[data-pairing-id="${pairingId}"]`);
       if (el) el.remove();
       pendingRequests.delete(pairingId);
-    }).catch(console.error);
-  });
+      setStatus(`pair request ignored (code ${code})`);
+    });
 
-  ignoreBtn.addEventListener('click', () => {
-    const el = pairRequestsEl.querySelector(`[data-pairing-id="${pairingId}"]`);
-    if (el) el.remove();
-    pendingRequests.delete(pairingId);
-    setStatus(`pair request ignored (code ${code})`);
-  });
-
-  pairRequestsEl.appendChild(div);
-}
-
+    pairRequestsEl.appendChild(div);
+  }
 
   // local edits -> schedule save
 
@@ -241,11 +275,10 @@ export function initIdentityApp() {
     }
     clearTimeout(saveTimeout);
     saveTimeout = setTimeout(() => {
-      ensureProfile(device.pk);
+      ensureProfile(device.pk, device.did);
       saveProfileToCache();
       identityRelay.publishProfile().catch(console.error);
 
-      // resubscribe pairing requests if owner name changed
       const profile = getProfile();
       const ownerName = profile && profile.name ? profile.name : '';
       pairingRelay.resubscribeForOwnerName(ownerName);
@@ -254,7 +287,7 @@ export function initIdentityApp() {
 
   displayNameEl.addEventListener('input', () => {
     if (!getIdentityId() || !getIdentityKeyBytes()) return;
-    ensureProfile(device.pk);
+    ensureProfile(device.pk, device.did);
     const profile = getProfile();
     profile.name = displayNameEl.value || '';
     scheduleSave();
@@ -262,7 +295,7 @@ export function initIdentityApp() {
 
   bioEl.addEventListener('input', () => {
     if (!getIdentityId() || !getIdentityKeyBytes()) return;
-    ensureProfile(device.pk);
+    ensureProfile(device.pk, device.did);
     const profile = getProfile();
     profile.bio = bioEl.value || '';
     scheduleSave();
@@ -270,13 +303,47 @@ export function initIdentityApp() {
 
   deviceNameEl.addEventListener('input', () => {
     if (!getIdentityId() || !getIdentityKeyBytes()) return;
-    ensureProfile(device.pk);
+    ensureProfile(device.pk, device.did);
     const profile = getProfile();
     const devs = profile.devices || [];
     const me = devs.find(d => d.pk === device.pk);
-    if (me) me.name = deviceNameEl.value || '';
+    if (me) {
+      me.name = deviceNameEl.value || '';
+    }
     scheduleSave();
   });
+
+  // WebAuthn upgrade buttons (onboarding + settings)
+
+  async function handleUpgradeDidClick() {
+    try {
+      setStatus('requesting platform authenticator…');
+      const upgraded = await upgradeDeviceDidWithWebAuthn();
+
+      device.did = upgraded.did;
+      device.didMethod = upgraded.didMethod;
+      refreshSecurityUI();
+
+      if (getIdentityId() && getIdentityKeyBytes()) {
+        ensureProfile(device.pk, device.did);
+        const profile = getProfile();
+        const devs = profile.devices || [];
+        const me = devs.find(d => d.pk === device.pk);
+        if (me) {
+          me.did = upgraded.did;
+        }
+        scheduleSave();
+      }
+
+      setStatus('device DID upgraded to platform key');
+    } catch (err) {
+      console.error('upgrade DID failed', err);
+      setStatus(err && err.message ? err.message : 'upgrade failed');
+    }
+  }
+
+  btnUpgradeDid.addEventListener('click', handleUpgradeDidClick);
+  btnOnboardSecure.addEventListener('click', handleUpgradeDidClick);
 
   // pairing flows
 
@@ -298,8 +365,8 @@ export function initIdentityApp() {
 
   function startWithOwnerIdentity() {
     showActivity('home');
-    ensureProfile(device.pk);
-    loadProfileFromCache(device.pk);
+    ensureProfile(device.pk, device.did);
+    loadProfileFromCache(device.pk, device.did);
     renderProfile();
     updateIdentityUrlInUI();
     identityRelay.connect();
@@ -320,7 +387,7 @@ export function initIdentityApp() {
   const hasLocal = loadAssociationFromLocal();
   const hasHash  = !hasLocal && loadAssociationFromHash(window.location.hash);
 
-  pairingRelay.connect(null); // start listening for accept events regardless
+  pairingRelay.connect(null);
 
   if (hasLocal || hasHash) {
     startWithOwnerIdentity();

@@ -8,6 +8,7 @@ import {
   getProfile,
   setProfile,
   ensureProfile,
+  ensureDeviceEntry,
   saveProfileToCache
 } from './identityState.js';
 
@@ -80,15 +81,14 @@ export function createIdentityRelay({ device, onStatus, onProfileChange }) {
           });
         }
 
-        // Update global profile + ensure this device is present
         setProfile(incoming);
-        ensureProfile(device.pk);
+        ensureProfile(device.pk, device.did);
+        ensureDeviceEntry(device.pk, device.did);
 
         const updatedProfile = getProfile();
         saveProfileToCache();
         onProfileChange && onProfileChange(updatedProfile);
 
-        // If this device wasn't in the roster, publish once with it added.
         if (!hadMe) {
           onStatus && onStatus('adding this device to identity…');
           await publishProfile();
@@ -107,7 +107,8 @@ export function createIdentityRelay({ device, onStatus, onProfileChange }) {
     if (!id || !keyBytes) return;
     if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-    ensureProfile(device.pk);
+    ensureProfile(device.pk, device.did);
+    ensureDeviceEntry(device.pk, device.did);
     const profile = getProfile();
     if (!profile) return;
 

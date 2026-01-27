@@ -118,12 +118,6 @@ h2 {
   margin: 0 0 0.5rem;
 }
 
-.small {
-  font-size: 0.75rem;
-  color: #888;
-  word-break: break-all;
-}
-
 /* Onboarding */
 
 #onboardView {
@@ -133,6 +127,12 @@ h2 {
   border-radius: 8px;
   border: 1px solid #222;
   background: #151515;
+}
+
+#onboardView h3 {
+  margin: 0 0 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 500;
 }
 
 .choice-row {
@@ -206,6 +206,7 @@ textarea { min-height: 80px; }
 /* Sections */
 
 .section {
+  margin-top: 0.75rem;
   margin-bottom: 1rem;
   border-bottom: 1px solid #222;
   padding-bottom: 0.75rem;
@@ -235,5 +236,23 @@ textarea { min-height: 80px; }
 }
 
 /* Utility */
+
+.small {
+  font-size: 0.75rem;
+  color: #888;
+  word-break: break-all;
+}
+
+.danger {
+  color: #f66;
+}
+
+.device-did-soft {
+  color: #f66;
+}
+
+.device-did-hw {
+  color: #8f8;
+}
 
 .hidden { display: none !important; }

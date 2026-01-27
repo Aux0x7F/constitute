@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Identity / Device Link Demo</title>
+  <title>Identity / Device Link</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="app.css" />
   <!-- nostr-tools UMD: exposes window.NostrTools -->
@@ -32,8 +32,28 @@
     <div id="onboardView">
       <h2>Get started</h2>
       <div class="small">
-        This device already has a Nostr keypair (device identity). Choose whether
-        to create a new owner identity or associate this device with an existing one.
+        This browser/device will have its own device identity (DID). You can secure
+        it with a platform-backed key (TPM / Secure Enclave) where supported.
+      </div>
+
+      <div class="section">
+        <h3>Device security (recommended)</h3>
+        <div class="small">
+          Current device security:
+          <span id="onboardSecurityStatus" class="danger">
+            software key only (upgrade strongly recommended)
+          </span>
+        </div>
+        <div class="row" style="margin-top: 0.5rem;">
+          <button id="btnOnboardSecureDevice" type="button">
+            Secure this device with platform key
+          </button>
+        </div>
+        <div class="small">
+          If this device cannot use a platform authenticator (WebAuthn), you can skip
+          and continue with a software-only key. You can also upgrade later from
+          Settings.
+        </div>
       </div>
 
       <div class="choice-row">
@@ -101,8 +121,19 @@
         <label for="deviceName">device name (visible to signer)</label>
         <input id="deviceName" type="text" placeholder="e.g. Kyle's laptop" />
 
-        <label>device pubkey</label>
+        <label>device pubkey (nostr)</label>
         <div class="small" id="devicePk"></div>
+
+        <label>device DID</label>
+        <div class="row">
+          <div class="small" id="deviceDid" style="flex:1; word-break:break-all;"></div>
+          <button id="btnUpgradeDid" type="button">upgrade to platform key</button>
+        </div>
+        <div class="small">
+          Devices without a platform-backed DID are marked in
+          <span class="danger">red</span> here. Upgrading binds this device to a
+          hardware-backed WebAuthn credential where supported.
+        </div>
       </div>
 
       <div class="section">
