@@ -1,0 +1,239 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #111;
+  color: #eee;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header + pane breadcrumb */
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid #222;
+  background: #141414;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.header-sub {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 2px;
+}
+
+#panePath {
+  font-size: 0.8rem;
+  color: #bbb;
+}
+
+#status {
+  font-size: 0.7rem;
+  color: #888;
+}
+
+/* Menu / activity switcher */
+
+#btnMenu {
+  border: 1px solid #333;
+  background: #202020;
+  color: #eee;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  display: none; /* only shown when identity associated */
+  position: relative;
+}
+#btnMenu:hover { background: #2a2a2a; }
+
+#menuDropdown {
+  position: absolute;
+  right: 0;
+  top: 32px;
+  background: #181818;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px 0;
+  display: none;
+  z-index: 10;
+  min-width: 120px;
+}
+#menuDropdown button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+#menuDropdown button:hover {
+  background: #262626;
+}
+
+/* Layout */
+
+.app {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+#mainPane {
+  flex: 1;
+  padding: 16px;
+}
+
+.placeholder {
+  border: 1px dashed #333;
+  border-radius: 6px;
+  padding: 16px;
+  font-size: 0.9rem;
+  color: #888;
+}
+
+/* Typography */
+
+h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.small {
+  font-size: 0.75rem;
+  color: #888;
+  word-break: break-all;
+}
+
+/* Onboarding */
+
+#onboardView {
+  max-width: 640px;
+  margin: 24px auto;
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid #222;
+  background: #151515;
+}
+
+.choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.choice {
+  flex: 1 1 220px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  padding: 12px;
+  background: #181818;
+}
+
+.choice h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+}
+
+.choice p {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: #aaa;
+}
+
+/* Forms */
+
+button {
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  background: #222;
+  color: #eee;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+button:hover { background: #2b2b2b; }
+
+label {
+  display: block;
+  font-size: 0.8rem;
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+  color: #bbb;
+}
+
+input[type="text"], textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  background: #181818;
+  color: #eee;
+  font-size: 0.9rem;
+  font-family: inherit;
+  resize: vertical;
+}
+textarea { min-height: 80px; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0.5rem;
+}
+
+/* Sections */
+
+.section {
+  margin-bottom: 1rem;
+  border-bottom: 1px solid #222;
+  padding-bottom: 0.75rem;
+}
+.section:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* Devices / pairing */
+
+.pill {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid #444;
+  font-size: 0.7rem;
+  color: #ccc;
+}
+
+.pair-request {
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-top: 6px;
+  font-size: 0.75rem;
+}
+
+/* Utility */
+
+.hidden { display: none !important; }

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Identity / Device Link Demo</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="app.css" />
+  <!-- nostr-tools UMD: exposes window.NostrTools -->
+  <script src="https://unpkg.com/nostr-tools@1.17.0/lib/nostr.bundle.js"></script>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Identity / Device Link</h1>
+    <div class="header-sub">
+      <span id="panePath">Onboarding</span>
+      <span id="status"></span>
+    </div>
+  </div>
+  <div style="position: relative;">
+    <button id="btnMenu" type="button">☰</button>
+    <div id="menuDropdown">
+      <button type="button" data-activity="home">Home</button>
+      <button type="button" data-activity="settings">Settings</button>
+    </div>
+  </div>
+</header>
+
+<div class="app">
+  <div id="mainPane">
+    <!-- onboarding (no owner association yet) -->
+    <div id="onboardView">
+      <h2>Get started</h2>
+      <div class="small">
+        This device already has a Nostr keypair (device identity). Choose whether
+        to create a new owner identity or associate this device with an existing one.
+      </div>
+
+      <div class="choice-row">
+        <div class="choice">
+          <h3>Create Identity</h3>
+          <p>
+            Create a new owner identity for yourself. This becomes your
+            profile / wallet-like state shared across your devices.
+          </p>
+          <button id="btnCreateOwner" type="button">Create new owner</button>
+        </div>
+
+        <div class="choice">
+          <h3>Associate Device</h3>
+          <p>
+            Add this device to an existing owner identity by searching for its
+            display name and confirming a pairing code on both devices.
+          </p>
+          <label for="ownerNameSearch">Owner name (display name)</label>
+          <input id="ownerNameSearch" type="text" placeholder="existing owner name" />
+          <button id="btnRequestPair" type="button">Request pairing</button>
+
+          <label>Pairing code</label>
+          <div class="small" id="pairCodeDisplay">(none)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Home activity -->
+    <div id="homeView" class="hidden">
+      <div class="placeholder">
+        Home activity.<br/><br/>
+        This is where you’d plug in swarmpads, dashboards, session lists, etc.,
+        using the identity and device roster wired up in Settings.
+      </div>
+    </div>
+
+    <!-- Settings activity -->
+    <div id="settingsView" class="hidden">
+      <div class="section">
+        <h2>Owner profile</h2>
+        <div class="small">
+          This profile is encrypted and synced between all devices associated with this owner.
+        </div>
+        <label for="displayName">display name (owner)</label>
+        <input id="displayName" type="text" placeholder="handle, alias, etc." />
+
+        <label for="bio">bio / notes</label>
+        <textarea id="bio"
+          placeholder="short description, wallet notes, etc."></textarea>
+
+        <label>owner identity link (optional, out-of-band)</label>
+        <div class="row">
+          <input id="identityUrl" type="text" readonly />
+          <button id="copyLink" type="button">copy</button>
+        </div>
+        <div class="small">
+          This link encodes the identity secret in the hash fragment. Sharing it
+          gives full access to the owner state.
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Device</h2>
+        <label for="deviceName">device name (visible to signer)</label>
+        <input id="deviceName" type="text" placeholder="e.g. Kyle's laptop" />
+
+        <label>device pubkey</label>
+        <div class="small" id="devicePk"></div>
+      </div>
+
+      <div class="section">
+        <h2>Devices in identity</h2>
+        <div class="small" id="devicesList">(none recorded yet)</div>
+      </div>
+
+      <div class="section">
+        <h2>Pending pairing requests</h2>
+        <div class="small">
+          When a new device searches for your owner name, you'll see a request here
+          with a 6-digit code. Only approve if the codes match on both screens.
+        </div>
+        <div id="pairRequests"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import { initIdentityApp } from './identity/identityApp.js';
+  initIdentityApp();
+</script>
+</body>
+</html>
