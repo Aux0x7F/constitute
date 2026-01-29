@@ -1,8 +1,12 @@
+// FILE: identity/sw/daemon.js
+
 import { kvGet, kvSet } from './idb.js';
-import { randomBytes, b64url, b64urlToBytes } from './crypto.js';
+import { randomBytes, b64url, b64urlToBytes, aesGcmEncrypt, aesGcmDecrypt } from './crypto.js';
 import { ensureNostrKeys, signEventUnsigned, nip04Encrypt, nip04Decrypt } from './nostr.js';
 
 const APP_TAG = 'constitute';
+const te = new TextEncoder();
+
 const SUB_ID = 'constitute_sub_v2';
 
 function emit(sw, evt) {
@@ -10,568 +14,873 @@ function emit(sw, evt) {
     for (const c of clients) c.postMessage({ type: 'evt', evt });
   });
 }
-function status(sw, message) { emit(sw, { type: 'status', message }); }
-function log(sw, message) { console.log('[SW]', message); emit(sw, { type: 'log', message }); }
-function pokeUi(sw) { emit(sw, { type: 'notify' }); }
 
-async function ensureDevice() {
-  let dev = await kvGet('device');
-  if (dev) return dev;
+function log(sw, ...args) {
+  emit(sw, { type: 'log', message: args.map(String).join(' ') });
+  console.log('[sw]', ...args);
+}
 
-  const deviceId = b64url(randomBytes(8));
-  const keys = ensureNostrKeys(null);
+function nowSec() {
+  return Math.floor(Date.now() / 1000);
+}
 
-  dev = {
-    deviceId,
-    didMethod: 'nostr-soft',
-    did: `did:device:nostr:${keys.pk}`,
-    webauthnCredId: null,
+function sha256Hex(bytes) {
+  // small helper for stable ids without pulling extra deps
+  return crypto.subtle.digest('SHA-256', bytes).then((buf) =>
+    [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('')
+  );
+}
+
+function stableRoomId(label) {
+  // Identity label is user-facing; room id derived to avoid leaking raw label in AAD and for stable namespace.
+  return sha256Hex(te.encode(`constitute:identity:${label || ''}`));
+}
+
+function isTruthy(x) {
+  return !!x;
+}
+
+function uniqBy(arr, keyFn) {
+  const seen = new Set();
+  const out = [];
+  for (const x of arr) {
+    const k = keyFn(x);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(x);
+  }
+  return out;
+}
+
+// ------------------------
+// Persistent state keys
+// ------------------------
+const KV = {
+  DEVICE: 'device.v1',
+  IDENTITY: 'identity.v1',
+  PROFILE: 'profile.v1',
+  RELAY: 'relay.v1',
+  NOTIFS: 'notifications.v1',
+  PAIR_REQS: 'pairing.requests.v1',
+};
+
+// ------------------------
+// Relay / Nostr plumbing
+// ------------------------
+let relayUrl = 'wss://relay.snort.social';
+let relayState = { ok: true, state: 'idle', url: relayUrl, code: null, reason: '' };
+
+function setRelayState(sw, patch) {
+  relayState = { ...relayState, ...patch };
+  emit(sw, { type: 'relay', ...relayState });
+}
+
+// ------------------------
+// Device / identity state
+// ------------------------
+async function getDevice() {
+  const d = (await kvGet(KV.DEVICE)) || null;
+  return d;
+}
+
+async function setDevice(d) {
+  await kvSet(KV.DEVICE, d);
+  return d;
+}
+
+async function getIdentity() {
+  const i = (await kvGet(KV.IDENTITY)) || {
+    id: '',
     label: '',
-    nostr: { pk: keys.pk, skHex: keys.skHex },
+    linked: false,
+    devices: [],
+    roomKeyB64: '', // symmetric key for room encryption (base64url)
+    created_at: nowSec(),
+    updated_at: nowSec(),
   };
-
-  await kvSet('device', dev);
-  return dev;
+  return i;
 }
 
-async function getIdentity() { return await kvGet('identity'); }
-async function setIdentity(identity) { await kvSet('identity', identity); }
-
-async function getProfile() { return (await kvGet('profile')) || { name: '', about: '' }; }
-async function setProfile(p) { await kvSet('profile', p); }
-
-function nowSec() { return Math.floor(Date.now() / 1000); }
-
-function makePairCode() {
-  return (Math.floor(Math.random() * 900000) + 100000).toString();
+async function setIdentity(i) {
+  i.updated_at = nowSec();
+  await kvSet(KV.IDENTITY, i);
+  return i;
 }
 
-async function relaySend(sw, frameArr) {
-  const frame = JSON.stringify(frameArr);
-  sw.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
-    for (const c of clients) c.postMessage({ type: 'relay.tx', data: frame });
+async function getProfile() {
+  return (await kvGet(KV.PROFILE)) || { name: '', about: '' };
+}
+
+async function setProfile(p) {
+  await kvSet(KV.PROFILE, p);
+  return p;
+}
+
+async function getNotifs() {
+  return (await kvGet(KV.NOTIFS)) || [];
+}
+
+async function setNotifs(list) {
+  await kvSet(KV.NOTIFS, list);
+  return list;
+}
+
+async function getPairReqs() {
+  return (await kvGet(KV.PAIR_REQS)) || [];
+}
+
+async function setPairReqs(list) {
+  await kvSet(KV.PAIR_REQS, list);
+  return list;
+}
+
+function deviceInIdentity(identity, { pk, did }) {
+  const devs = identity.devices || [];
+  return devs.some((d) => (pk && d.pk === pk) || (did && d.did === did));
+}
+
+function upsertDevice(identity, dev) {
+  const devs = identity.devices || [];
+  const out = [];
+  let didAdd = true;
+  for (const d of devs) {
+    const same =
+      (dev.pk && d.pk === dev.pk) ||
+      (dev.did && d.did === dev.did);
+    if (same) {
+      didAdd = false;
+      out.push({ ...d, ...dev, updated_at: nowSec() });
+    } else {
+      out.push(d);
+    }
+  }
+  if (didAdd) out.push({ ...dev, added_at: nowSec(), updated_at: nowSec() });
+  identity.devices = out;
+  identity.linked = true;
+  return identity;
+}
+
+// ------------------------
+// Notifications
+// ------------------------
+function makeNotif({ kind = 'general', title = '', body = '', data = null }) {
+  return {
+    id: `n_${crypto.getRandomValues(new Uint32Array(4)).join('')}_${nowSec()}`,
+    kind,
+    title,
+    body,
+    data,
+    created_at: nowSec(),
+    read: false,
+    cleared: false,
+  };
+}
+
+async function addNotif(sw, n) {
+  const list = await getNotifs();
+  list.unshift(n);
+  await setNotifs(list);
+  emit(sw, { type: 'notify' });
+}
+
+async function clearNotifs(sw) {
+  await setNotifs([]);
+  emit(sw, { type: 'notify' });
+}
+
+// ------------------------
+// Pair requests lifecycle
+// ------------------------
+function normalizeReq(r) {
+  return {
+    id: r.id || `pr_${crypto.getRandomValues(new Uint32Array(4)).join('')}_${nowSec()}`,
+    identityLabel: r.identityLabel || '',
+    identityId: r.identityId || '',
+    devicePk: r.devicePk || '',
+    deviceDid: r.deviceDid || '',
+    deviceLabel: r.deviceLabel || '',
+    code: r.code || '',
+    status: r.status || 'pending', // pending | approved | rejected | dismissed
+    created_at: r.created_at || nowSec(),
+    updated_at: r.updated_at || nowSec(),
+    resolved_at: r.resolved_at || 0,
+  };
+}
+
+async function upsertPairReq(sw, reqPatch) {
+  const list = await getPairReqs();
+  const r = normalizeReq(reqPatch);
+  const out = [];
+  let replaced = false;
+  for (const x of list) {
+    if (x.id === r.id) {
+      out.push({ ...x, ...r, updated_at: nowSec() });
+      replaced = true;
+    } else {
+      out.push(x);
+    }
+  }
+  if (!replaced) out.unshift(r);
+  await setPairReqs(out);
+  emit(sw, { type: 'notify' });
+  return r;
+}
+
+async function resolvePairReq(sw, id, status) {
+  const list = await getPairReqs();
+  const out = [];
+  for (const x of list) {
+    if (x.id === id) {
+      out.push({
+        ...x,
+        status,
+        resolved_at: nowSec(),
+        updated_at: nowSec(),
+      });
+    } else {
+      out.push(x);
+    }
+  }
+  await setPairReqs(out);
+  emit(sw, { type: 'notify' });
+}
+
+async function dismissPairReq(sw, id) {
+  await resolvePairReq(sw, id, 'dismissed');
+}
+
+async function listPendingPairReqs() {
+  const [list, ident] = await Promise.all([getPairReqs(), getIdentity()]);
+  const knownPks = new Set((ident.devices || []).map((d) => d.pk).filter(isTruthy));
+  const knownDids = new Set((ident.devices || []).map((d) => d.did).filter(isTruthy));
+  return list.filter((r) => {
+    if (r.status !== 'pending') return false;
+    if (r.devicePk && knownPks.has(r.devicePk)) return false;
+    if (r.deviceDid && knownDids.has(r.deviceDid)) return false;
+    return true;
   });
 }
 
-async function subscribeOnRelayOpen(sw) {
-  // We subscribe to app tag, and also to identity label if we know it (to cut spam).
-  const ident = await getIdentity();
-  const filters = [{ kinds: [1], '#t': [APP_TAG], limit: 200 }];
-
-  if (ident?.label) {
-    // identity scoping tag: ["i", "<label>"]
-    filters.unshift({ kinds: [1], '#t': [APP_TAG], '#i': [ident.label], limit: 200 });
-  }
-
-  await relaySend(sw, ['REQ', SUB_ID, ...filters]);
-  log(sw, 'sent REQ subscribe');
+// ------------------------
+// Room encryption helpers (AES-GCM)
+// ------------------------
+async function getRoomKeyBytes(identity) {
+  if (!identity.roomKeyB64) return null;
+  return b64urlToBytes(identity.roomKeyB64);
 }
 
-async function publishAppEvent(sw, payloadObj, extraTags = []) {
-  const dev = await ensureDevice();
+function makeAAD({ roomIdHex, kind, senderPk, created_at }) {
+  // Bind ciphertext to room + type + sender + time
+  return te.encode(`${roomIdHex}|${kind}|${senderPk || ''}|${created_at || 0}`);
+}
+
+async function encryptRoomPayload(identity, plaintextObj, aadMeta) {
+  const key = await getRoomKeyBytes(identity);
+  if (!key) throw new Error('missing_room_key');
+  const pt = te.encode(JSON.stringify(plaintextObj));
+  const aad = makeAAD(aadMeta);
+  const { ivB64, ctB64 } = await aesGcmEncrypt(key, pt, aad);
+  return { iv: ivB64, ct: ctB64, v: 1 };
+}
+
+async function decryptRoomPayload(identity, enc, aadMeta) {
+  const key = await getRoomKeyBytes(identity);
+  if (!key) throw new Error('missing_room_key');
+  const aad = makeAAD(aadMeta);
+  const ptBytes = await aesGcmDecrypt(key, enc.iv, enc.ct, aad);
+  const txt = new TextDecoder().decode(ptBytes);
+  return JSON.parse(txt);
+}
+
+function isRoomEncryptedKind(kind) {
+  // Everything identity-scoped that isn't required for onboarding stays encrypted.
+  // Plaintext kinds for onboarding/bootstrapping:
+  // - pair_request / pair_approve / pair_reject / pair_resolved / identity_created
+  return ![
+    'pair_request',
+    'pair_approve',
+    'pair_reject',
+    'pair_resolved',
+    'identity_created',
+  ].includes(kind);
+}
+
+// ------------------------
+// Nostr event envelope
+// ------------------------
+function mkTags(identityLabel) {
+  // app tag + identity label (label is not secret; content is encrypted)
+  // We keep the label tag so devices can subscribe without knowing room key.
+  return [
+    ['t', APP_TAG],
+    ['d', identityLabel || ''],
+  ];
+}
+
+async function publishKind(sw, kind, payloadObj, opts = {}) {
+  const identity = await getIdentity();
+  if (!identity.label) throw new Error('no_identity_label');
+
+  const keys = await ensureNostrKeys(sw);
+  const created_at = nowSec();
+  const roomIdHex = await stableRoomId(identity.label);
+
+  let contentObj;
+  if (isRoomEncryptedKind(kind)) {
+    const enc = await encryptRoomPayload(
+      identity,
+      { kind, payload: payloadObj },
+      { roomIdHex, kind, senderPk: keys.pubkey, created_at }
+    );
+    contentObj = { enc, kind: 'enc', room: roomIdHex };
+  } else {
+    contentObj = { kind, payload: payloadObj };
+  }
 
   const unsigned = {
     kind: 1,
-    created_at: nowSec(),
-    tags: [['t', APP_TAG], ...extraTags],
-    content: JSON.stringify(payloadObj),
-    pubkey: dev.nostr.pk,
+    created_at,
+    tags: mkTags(identity.label),
+    content: JSON.stringify(contentObj),
+    pubkey: keys.pubkey,
   };
 
-  const ev = signEventUnsigned(unsigned, dev.nostr.skHex);
-  await relaySend(sw, ['EVENT', ev]);
-  return ev.id;
+  const signed = await signEventUnsigned(keys, unsigned);
+  // send via UI bridge to SharedWorker
+  sw.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+    for (const c of clients) c.postMessage({ type: 'relay.tx', data: JSON.stringify(['EVENT', signed]) });
+  });
+
+  return { ok: true };
 }
 
-// ----- Notifications / pairing storage -----
-
-async function notifAdd(n) {
-  const list = (await kvGet('notifications')) || [];
-  list.unshift(n);
-  while (list.length > 200) list.pop();
-  await kvSet('notifications', list);
-}
-
-async function notifList() {
-  return (await kvGet('notifications')) || [];
-}
-
-async function notifMarkRead(id) {
-  const list = (await kvGet('notifications')) || [];
-  for (const n of list) {
-    if (n.id === id) n.read = true;
-  }
-  await kvSet('notifications', list);
-}
-
-async function pendingAdd(req) {
-  const list = (await kvGet('pairPending')) || [];
-  if (!list.some(x => x.id === req.id)) list.unshift(req);
-  await kvSet('pairPending', list);
-}
-
-async function pendingList() {
-  return (await kvGet('pairPending')) || [];
-}
-
-async function pendingRemove(id) {
-  const list = (await kvGet('pairPending')) || [];
-  await kvSet('pairPending', list.filter(x => x.id !== id));
-}
-
-async function getThisDeviceLabel() {
-  const dev = await ensureDevice();
-  return dev.label || '';
-}
-
-async function setThisDeviceLabel(label) {
-  const dev = await ensureDevice();
-  dev.label = label;
-  await kvSet('device', dev);
-
-  // also update identity device list if linked
-  const ident = await getIdentity();
-  if (ident?.linked && Array.isArray(ident.devices)) {
-    const me = ident.devices.find(d => d.pk === dev.nostr.pk);
-    if (me) me.label = label;
-    await setIdentity(ident);
-  }
-}
-
-// ----- Relay frame handling -----
-
-async function handleRelayFrame(sw, raw) {
-  const s = String(raw || '');
-  if (!s) return;
-
+// ------------------------
+// Relay RX handling
+// ------------------------
+async function handleRelayMessage(sw, frame) {
+  // Expect nostr frames from UI -> SharedWorker -> SW (as JSON array)
   let msg;
-  try { msg = JSON.parse(s); } catch { return; }
-  const [type] = msg;
+  try { msg = JSON.parse(frame); } catch { return; }
 
-  if (type === 'NOTICE') { log(sw, `NOTICE: ${String(msg[1] || '').slice(0, 160)}`); return; }
-  if (type === 'EOSE') { return; }
-  if (type !== 'EVENT') return;
+  // We only care about EVENT frames for our subscription
+  if (msg[0] === 'EVENT') {
+    const ev = msg[2];
+    if (!ev || typeof ev.content !== 'string') return;
 
-  const subId = msg[1];
-  const ev = msg[2];
-  if (subId !== SUB_ID || !ev) return;
+    // filter app tag quickly
+    const tags = Array.isArray(ev.tags) ? ev.tags : [];
+    const hasApp = tags.some((t) => t[0] === 't' && t[1] === APP_TAG);
+    if (!hasApp) return;
 
-  const tags = Array.isArray(ev.tags) ? ev.tags : [];
-  const hasAppTag = tags.some(t => Array.isArray(t) && t[0] === 't' && t[1] === APP_TAG);
-  if (!hasAppTag) return;
+    const identity = await getIdentity();
+    if (!identity.label) return;
 
-  // Parse payload
-  let payload = null;
-  try { payload = JSON.parse(ev.content || ''); } catch { return; }
-  if (!payload?.type) return;
+    // match identity label
+    const matchLabel = tags.some((t) => t[0] === 'd' && t[1] === identity.label);
+    if (!matchLabel) return;
 
-  const dev = await ensureDevice();
-  const ident = await getIdentity();
+    // parse content
+    let content;
+    try { content = JSON.parse(ev.content); } catch { return; }
 
-  // Optional: identity scoping if we know label
-  const identityTag = tags.find(t => Array.isArray(t) && t[0] === 'i');
-  const scopedLabel = identityTag?.[1] || null;
-  if (ident?.label && scopedLabel && scopedLabel !== ident.label) {
-    // Not for our identity
-    return;
-  }
+    // encrypted wrapper?
+    if (content && content.kind === 'enc' && content.enc) {
+      // Can't process without room key.
+      if (!identity.roomKeyB64) return;
 
-  if (payload.type === 'pair_request') {
-    // Only show as pending if it targets our identity label
-    if (!ident?.linked || !ident?.label) return;
-    if (payload.identity !== ident.label) return;
+      try {
+        const roomIdHex = content.room || (await stableRoomId(identity.label));
+        const created_at = ev.created_at || 0;
+        const senderPk = ev.pubkey || '';
+        const inner = await decryptRoomPayload(identity, content.enc, {
+          roomIdHex,
+          kind: 'enc', // AAD uses wrapper kind to match encrypt call
+          senderPk,
+          created_at,
+        });
 
-    const reqId = `${payload.identity}:${payload.code}:${payload.devicePk}`;
-    const req = {
-      id: reqId,
-      identityLabel: payload.identity,
-      code: payload.code,
-      devicePk: payload.devicePk,
-      deviceDid: payload.deviceDid,
-      deviceLabel: payload.deviceLabel || '',
-      created_at: ev.created_at,
-    };
-    await pendingAdd(req);
-
-    await notifAdd({
-      id: `n-${reqId}`,
-      kind: 'pairing',
-      title: 'Pairing request',
-      body: `${payload.deviceLabel || 'device'} wants to join ${payload.identity} (code ${payload.code})`,
-      ts: Date.now(),
-      read: false,
-    });
-
-    pokeUi(sw);
-    return;
-  }
-
-  if (payload.type === 'pair_approve') {
-    // If this device is the target, decrypt roomKey and link identity
-    if (payload.toPk !== dev.nostr.pk) return;
-
-    // Verify identity label matches what we’re trying to join
-    const wanted = await kvGet('pendingJoinIdentityLabel');
-    if (wanted && payload.identity !== wanted) {
-      // ignore approvals for other identities
+        // inner = { kind, payload }
+        if (!inner || !inner.kind) return;
+        await dispatchRoomKind(sw, inner.kind, inner.payload, ev);
+      } catch (e) {
+        // Decryption errors should not crash daemon
+        log(sw, 'decrypt failed', e?.message || e);
+        return;
+      }
       return;
     }
 
-    try {
-      const plaintext = await nip04Decrypt(dev.nostr.skHex, payload.fromPk, payload.encryptedRoomKey);
-      const obj = JSON.parse(plaintext);
-
-      if (!obj?.roomKeyB64 || !obj?.identityId) throw new Error('bad approval payload');
-
-      const newIdent = {
-        id: obj.identityId,
-        label: payload.identity,
-        roomKeyB64: obj.roomKeyB64,
-        linked: true,
-        devices: obj.devices || [],
-      };
-
-      // Ensure this device exists in device list
-      const meLabel = await getThisDeviceLabel();
-      const exists = newIdent.devices.some(d => d.pk === dev.nostr.pk);
-      if (!exists) newIdent.devices.push({ pk: dev.nostr.pk, did: dev.did, label: meLabel });
-
-      await setIdentity(newIdent);
-
-      await notifAdd({
-        id: `n-approve-${payload.identity}-${payload.code}`,
-        kind: 'pairing',
-        title: 'Device paired',
-        body: `Joined identity ${payload.identity}`,
-        ts: Date.now(),
-        read: false,
-      });
-
-      // clear pending join marker
-      await kvSet('pendingJoinIdentityLabel', null);
-
-      status(sw, `paired into ${payload.identity}`);
-      pokeUi(sw);
-    } catch (e) {
-      log(sw, `pair_approve decrypt failed: ${String(e?.message || e)}`);
+    // plaintext kinds
+    if (content && content.kind) {
+      await dispatchRoomKind(sw, content.kind, content.payload, ev);
     }
-    return;
-  }
-
-  if (payload.type === 'pair_reject') {
-    if (payload.toPk !== dev.nostr.pk) return;
-    await notifAdd({
-      id: `n-reject-${payload.identity}-${payload.code}`,
-      kind: 'pairing',
-      title: 'Pairing rejected',
-      body: `Request rejected for ${payload.identity} (code ${payload.code})`,
-      ts: Date.now(),
-      read: false,
-    });
-    pokeUi(sw);
-    return;
-  }
-
-  if (payload.type === 'profile_update') {
-    // If it’s our profile pubkey, accept update
-    if (payload.pk !== dev.nostr.pk) return;
-    await setProfile({ name: payload.name || '', about: payload.about || '' });
-    pokeUi(sw);
-    return;
   }
 }
 
-// ----- API -----
+async function dispatchRoomKind(sw, kind, payload, ev) {
+  switch (kind) {
+    case 'pair_request':
+      return onPairRequest(sw, payload, ev);
+    case 'pair_approve':
+      return onPairApprove(sw, payload, ev);
+    case 'pair_reject':
+      return onPairReject(sw, payload, ev);
+    case 'pair_resolved':
+      return onPairResolved(sw, payload, ev);
+    case 'identity_created':
+      return onIdentityCreated(sw, payload, ev);
 
-export function startDaemon(sw) {
-  status(sw, 'identity daemon online');
+    // room-encrypted kinds (examples / future)
+    case 'profile_set':
+      return onProfileSet(sw, payload, ev);
+    case 'device_label_set':
+      return onDeviceLabelSet(sw, payload, ev);
 
-  let relayState = 'idle';
+    default:
+      // ignore unknown kinds
+      return;
+  }
+}
 
-  sw.addEventListener('message', (e) => {
-    const msg = e.data;
-    if (!msg || msg.type !== 'req') return;
+// ------------------------
+// Handlers
+// ------------------------
+async function onIdentityCreated(sw, payload) {
+  // Payload might include room key envelope for creator's other devices; for now creator sets locally.
+  emit(sw, { type: 'notify' });
+}
 
-    const { id, method, params } = msg;
+async function onPairRequest(sw, payload) {
+  // payload: { requestId, devicePk, deviceDid, deviceLabel, identityLabel, code, created_at }
+  const identity = await getIdentity();
+  if (!identity.label) return;
+  if (payload.identityLabel && payload.identityLabel !== identity.label) return;
 
-    (async () => {
-      try {
-        const result = await handle(sw, method, params, () => relayState, (s) => relayState = s);
-        e.source.postMessage({ type: 'res', id, ok: true, result });
-      } catch (err) {
-        e.source.postMessage({ type: 'res', id, ok: false, error: String(err?.message || err) });
-      }
-    })();
+  // Ignore if already in identity
+  if (deviceInIdentity(identity, { pk: payload.devicePk, did: payload.deviceDid })) return;
+
+  const req = await upsertPairReq(sw, {
+    id: payload.requestId,
+    identityLabel: identity.label,
+    identityId: identity.id,
+    devicePk: payload.devicePk,
+    deviceDid: payload.deviceDid,
+    deviceLabel: payload.deviceLabel,
+    code: payload.code,
+    status: 'pending',
+    created_at: payload.created_at || nowSec(),
   });
+
+  await addNotif(sw, makeNotif({
+    kind: 'pairing',
+    title: 'Pairing request',
+    body: req.deviceLabel ? `Request from: ${req.deviceLabel}` : 'New device wants to join',
+    data: { requestId: req.id },
+  }));
+
+  emit(sw, { type: 'notify' });
 }
 
-async function handle(sw, method, params, getRelayState, setRelayState) {
-  if (method === 'device.getState') {
-    const dev = await ensureDevice();
-    const ident = await getIdentity();
-    return {
-      did: dev.did,
-      didMethod: dev.didMethod,
-      identityLinked: !!ident?.linked,
-      pk: dev.nostr?.pk,
-    };
-  }
+async function onPairApprove(sw, payload) {
+  // payload: { requestId, devicePk, deviceDid, roomKeyCipher, approverPk, created_at }
+  const identity = await getIdentity();
+  const device = await getDevice();
+  if (!device) return;
 
-  if (method === 'device.wantWebAuthnUpgrade') {
-    const dev = await ensureDevice();
-    if (dev.didMethod === 'webauthn' && dev.webauthnCredId) return { ok: false };
-    return { ok: true, deviceIdHint: dev.deviceId };
-  }
+  // Only process if this approval is for us
+  if (payload.devicePk && device.pk && payload.devicePk !== device.pk) return;
+  if (payload.deviceDid && device.did && payload.deviceDid !== device.did) return;
 
-  if (method === 'device.setWebAuthn') {
-    const dev = await ensureDevice();
-    const credIdB64 = String(params?.credIdB64 || '').trim();
-    if (!credIdB64) throw new Error('missing credIdB64');
-
-    dev.didMethod = 'webauthn';
-    dev.webauthnCredId = credIdB64;
-    dev.did = `did:device:webauthn:${credIdB64}`;
-    await kvSet('device', dev);
-    return { did: dev.did, didMethod: dev.didMethod };
-  }
-
-  if (method === 'device.noteWebAuthnSkipped') {
-    status(sw, `WebAuthn skipped`);
-    return { ok: true };
-  }
-
-  if (method === 'device.getLabel') {
-    const dev = await ensureDevice();
-    return { label: dev.label || '' };
-  }
-
-  if (method === 'device.setLabel') {
-    const label = String(params?.label || '').trim();
-    if (!label) throw new Error('label required');
-    await setThisDeviceLabel(label);
-    status(sw, 'label updated');
-    pokeUi(sw);
-    return { ok: true };
-  }
-
-  if (method === 'relay.status') {
-    const state = String(params?.state || '');
-    const url = String(params?.url || '');
-    if (state && state !== getRelayState()) {
-      setRelayState(state);
-      log(sw, `relay state -> ${state} ${url}`);
+  // Decrypt room key if provided (NIP-04 ciphertext)
+  if (payload.roomKeyCipher) {
+    const keys = await ensureNostrKeys(sw);
+    try {
+      const roomKeyB64 = await nip04Decrypt(keys, payload.approverPk, payload.roomKeyCipher);
+      identity.roomKeyB64 = roomKeyB64;
+    } catch (e) {
+      log(sw, 'room key decrypt failed', e?.message || e);
     }
-    if (state === 'open') await subscribeOnRelayOpen(sw);
-    return { ok: true };
   }
 
-  if (method === 'relay.rx') {
-    await handleRelayFrame(sw, String(params?.data || ''));
-    return { ok: true };
+  // Resolve request locally
+  if (payload.requestId) {
+    await resolvePairReq(sw, payload.requestId, 'approved');
   }
 
-  if (method === 'identity.get') {
-    const ident = await getIdentity();
-    return {
-      linked: !!ident?.linked,
-      id: ident?.id || '',
-      label: ident?.label || '',
-      devices: ident?.devices || [],
-    };
-  }
+  // Ensure we are in identity devices and mark linked
+  upsertDevice(identity, {
+    pk: device.pk,
+    did: device.did,
+    label: device.label || '',
+  });
+  identity.linked = true;
+  await setIdentity(identity);
 
-  if (method === 'identity.create') {
-    const dev = await ensureDevice();
-    const identityLabel = String(params?.identityLabel || '').trim();
-    const deviceLabel = String(params?.deviceLabel || '').trim();
-    if (!deviceLabel) throw new Error('device label required');
-    if (!identityLabel) throw new Error('identity label required');
+  await addNotif(sw, makeNotif({
+    kind: 'pairing',
+    title: 'Paired',
+    body: 'This device was approved and joined the identity.',
+    data: { requestId: payload.requestId || null },
+  }));
 
-    dev.label = deviceLabel;
-    await kvSet('device', dev);
-
-    const roomKey = randomBytes(32);
-    const ident = {
-      id: `id-${b64url(randomBytes(12))}`,
-      label: identityLabel,
-      roomKeyB64: b64url(roomKey),
-      linked: true,
-      devices: [{ did: dev.did, pk: dev.nostr.pk, label: deviceLabel }],
-    };
-    await setIdentity(ident);
-
-    await publishAppEvent(sw, {
-      type: 'identity_created',
-      identity: identityLabel,
-      identityId: ident.id,
-      devicePk: dev.nostr.pk,
-      deviceLabel,
-    }, [['i', identityLabel]]);
-
-    status(sw, 'identity created');
-    pokeUi(sw);
-    return { ok: true };
-  }
-
-  if (method === 'identity.requestPair') {
-    const dev = await ensureDevice();
-    const identityLabel = String(params?.identityLabel || '').trim();
-    const deviceLabel = String(params?.deviceLabel || '').trim();
-    if (!identityLabel) throw new Error('identity label required');
-    if (!deviceLabel) throw new Error('device label required');
-
-    dev.label = deviceLabel;
-    await kvSet('device', dev);
-
-    const code = makePairCode();
-
-    // remember what identity we're trying to join so we can accept approval
-    await kvSet('pendingJoinIdentityLabel', identityLabel);
-
-    await publishAppEvent(sw, {
-      type: 'pair_request',
-      identity: identityLabel,
-      code,
-      deviceLabel,
-      deviceDid: dev.did,
-      devicePk: dev.nostr.pk,
-    }, [['i', identityLabel], ['p', dev.nostr.pk]]);
-
-    status(sw, `pair request sent (${code})`);
-    pokeUi(sw);
-    return { code };
-  }
-
-  // Settings: Profile
-  if (method === 'profile.get') {
-    return await getProfile();
-  }
-
-  if (method === 'profile.set') {
-    const name = String(params?.name || '').trim();
-    const about = String(params?.about || '').trim();
-    await setProfile({ name, about });
-
-    const dev = await ensureDevice();
-    // publish signed profile update (not secret)
-    await publishAppEvent(sw, {
-      type: 'profile_update',
-      pk: dev.nostr.pk,
-      name,
-      about,
-    }, [['p', dev.nostr.pk]]);
-
-    status(sw, 'profile saved');
-    pokeUi(sw);
-    return { ok: true };
-  }
-
-  // Notifications
-  if (method === 'notifications.list') {
-    const list = await notifList();
-    // return newest first, include unread
-    return list;
-  }
-
-  if (method === 'notifications.markRead') {
-    const id = String(params?.id || '');
-    if (!id) throw new Error('missing id');
-    await notifMarkRead(id);
-    pokeUi(sw);
-    return { ok: true };
-  }
-
-  // Pairing list + actions
-  if (method === 'pairing.list') {
-    return await pendingList();
-  }
-
-  if (method === 'pairing.dismiss') {
-    const rid = String(params?.requestId || '');
-    if (!rid) throw new Error('missing requestId');
-    await pendingRemove(rid);
-    pokeUi(sw);
-    return { ok: true };
-  }
-
-  if (method === 'pairing.reject') {
-    const rid = String(params?.requestId || '');
-    if (!rid) throw new Error('missing requestId');
-
-    const reqs = await pendingList();
-    const r = reqs.find(x => x.id === rid);
-    if (!r) throw new Error('request not found');
-
-    const dev = await ensureDevice();
-
-    await publishAppEvent(sw, {
-      type: 'pair_reject',
-      identity: r.identityLabel,
-      code: r.code,
-      toPk: r.devicePk,
-      fromPk: dev.nostr.pk,
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
-
-    await pendingRemove(rid);
-    status(sw, 'rejected');
-    pokeUi(sw);
-    return { ok: true };
-  }
-
-  if (method === 'pairing.approve') {
-    const rid = String(params?.requestId || '');
-    if (!rid) throw new Error('missing requestId');
-
-    const ident = await getIdentity();
-    if (!ident?.linked || !ident?.roomKeyB64) throw new Error('no linked identity on this device');
-
-    const reqs = await pendingList();
-    const r = reqs.find(x => x.id === rid);
-    if (!r) throw new Error('request not found');
-
-    const dev = await ensureDevice();
-
-    // Build approval payload with room key + device list
-    const payload = JSON.stringify({
-      identityId: ident.id,
-      roomKeyB64: ident.roomKeyB64,
-      devices: ident.devices || [],
-    });
-
-    // Encrypt room key payload to the requester device
-    const encryptedRoomKey = await nip04Encrypt(dev.nostr.skHex, r.devicePk, payload);
-
-    await publishAppEvent(sw, {
-      type: 'pair_approve',
-      identity: r.identityLabel,
-      code: r.code,
-      toPk: r.devicePk,
-      fromPk: dev.nostr.pk,
-      encryptedRoomKey,
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
-
-    // Update local identity devices list to include requester
-    const exists = (ident.devices || []).some(d => d.pk === r.devicePk);
-    if (!exists) {
-      ident.devices.push({ pk: r.devicePk, did: r.deviceDid || '', label: r.deviceLabel || '' });
-      await setIdentity(ident);
-    }
-
-    await pendingRemove(rid);
-
-    await notifAdd({
-      id: `n-approved-${rid}`,
-      kind: 'pairing',
-      title: 'Approved pairing',
-      body: `${r.deviceLabel || 'device'} added to ${r.identityLabel}`,
-      ts: Date.now(),
-      read: false,
-    });
-
-    status(sw, 'approved');
-    pokeUi(sw);
-    return { ok: true };
-  }
-
-  throw new Error(`unknown method: ${method}`);
+  emit(sw, { type: 'notify' });
 }
+
+async function onPairReject(sw, payload) {
+  const device = await getDevice();
+  if (!device) return;
+
+  if (payload.devicePk && device.pk && payload.devicePk !== device.pk) return;
+  if (payload.deviceDid && device.did && payload.deviceDid !== device.did) return;
+
+  if (payload.requestId) await resolvePairReq(sw, payload.requestId, 'rejected');
+
+  await addNotif(sw, makeNotif({
+    kind: 'pairing',
+    title: 'Pairing rejected',
+    body: 'Another device rejected this pairing request.',
+    data: { requestId: payload.requestId || null },
+  }));
+
+  emit(sw, { type: 'notify' });
+}
+
+async function onPairResolved(sw, payload) {
+  // payload: { requestId, status }
+  if (!payload?.requestId) return;
+  await resolvePairReq(sw, payload.requestId, payload.status || 'dismissed');
+  emit(sw, { type: 'notify' });
+}
+
+async function onProfileSet(sw, payload) {
+  // payload: { name, about }
+  const p = await getProfile();
+  const next = { ...p, ...payload };
+  await setProfile(next);
+  emit(sw, { type: 'notify' });
+}
+
+async function onDeviceLabelSet(sw, payload) {
+  // payload: { pk, did, label }
+  const identity = await getIdentity();
+  const dev = identity.devices?.find((d) => (payload.pk && d.pk === payload.pk) || (payload.did && d.did === payload.did));
+  if (!dev) return;
+  dev.label = payload.label || dev.label;
+  dev.updated_at = nowSec();
+  await setIdentity(identity);
+  emit(sw, { type: 'notify' });
+}
+
+// ------------------------
+// Outbound ops
+// ------------------------
+async function ensureRoomKey(identity) {
+  if (identity.roomKeyB64) return identity;
+  const keyBytes = randomBytes(32);
+  identity.roomKeyB64 = b64url(keyBytes);
+  return identity;
+}
+
+async function createIdentity(sw, { identityLabel, deviceLabel }) {
+  const device = await getDevice();
+  const keys = await ensureNostrKeys(sw);
+
+  // ensure local device state
+  if (deviceLabel) {
+    device.label = deviceLabel;
+    await setDevice(device);
+  }
+
+  const identity = await getIdentity();
+  identity.label = identityLabel || identity.label || '';
+  if (!identity.id) identity.id = `id_${crypto.getRandomValues(new Uint32Array(4)).join('')}`;
+
+  // generate room key now
+  await ensureRoomKey(identity);
+
+  upsertDevice(identity, {
+    pk: device.pk || keys.pubkey,
+    did: device.did,
+    label: device.label || '',
+  });
+
+  identity.linked = true;
+  await setIdentity(identity);
+
+  // announce identity created (plaintext)
+  await publishKind(sw, 'identity_created', { identityLabel: identity.label, identityId: identity.id });
+
+  await addNotif(sw, makeNotif({
+    kind: 'general',
+    title: 'Identity created',
+    body: identity.label ? `Created: ${identity.label}` : 'Created an identity',
+  }));
+
+  emit(sw, { type: 'notify' });
+  return { ok: true };
+}
+
+async function requestPair(sw, { identityLabel, deviceLabel }) {
+  const identity = await getIdentity();
+  const device = await getDevice();
+  const keys = await ensureNostrKeys(sw);
+
+  if (!identity.label && identityLabel) {
+    identity.label = identityLabel;
+    await setIdentity(identity);
+  }
+
+  if (deviceLabel) {
+    device.label = deviceLabel;
+    await setDevice(device);
+  }
+
+  const requestId = `pr_${crypto.getRandomValues(new Uint32Array(4)).join('')}_${nowSec()}`;
+  const code = Math.random().toString(36).slice(2, 8);
+
+  await upsertPairReq(sw, {
+    id: requestId,
+    identityLabel: identity.label || identityLabel || '',
+    identityId: identity.id || '',
+    devicePk: keys.pubkey,
+    deviceDid: device.did,
+    deviceLabel: device.label || '',
+    code,
+    status: 'pending',
+    created_at: nowSec(),
+  });
+
+  await publishKind(sw, 'pair_request', {
+    requestId,
+    identityLabel: identity.label || identityLabel || '',
+    devicePk: keys.pubkey,
+    deviceDid: device.did,
+    deviceLabel: device.label || '',
+    code,
+    created_at: nowSec(),
+  });
+
+  emit(sw, { type: 'notify' });
+  return { ok: true, requestId, code };
+}
+
+async function approvePair(sw, { requestId }) {
+  const identity = await getIdentity();
+  const keys = await ensureNostrKeys(sw);
+  const reqs = await getPairReqs();
+  const req = reqs.find((r) => r.id === requestId);
+  if (!req) return { ok: false, error: 'request_not_found' };
+  if (req.status !== 'pending') return { ok: true, already: true };
+
+  // ensure room key exists
+  await ensureRoomKey(identity);
+  await setIdentity(identity);
+
+  // encrypt room key for new device using NIP-04 (approver -> devicePk)
+  let roomKeyCipher = '';
+  try {
+    roomKeyCipher = await nip04Encrypt(keys, req.devicePk, identity.roomKeyB64);
+  } catch (e) {
+    log(sw, 'nip04 encrypt failed', e?.message || e);
+  }
+
+  // mark resolved locally at source (fixes stale pending)
+  await resolvePairReq(sw, requestId, 'approved');
+
+  // add device to identity
+  upsertDevice(identity, {
+    pk: req.devicePk,
+    did: req.deviceDid,
+    label: req.deviceLabel || '',
+  });
+  await setIdentity(identity);
+
+  // publish approval (plaintext) so joining device can decrypt key
+  await publishKind(sw, 'pair_approve', {
+    requestId,
+    identityLabel: identity.label,
+    devicePk: req.devicePk,
+    deviceDid: req.deviceDid,
+    approverPk: keys.pubkey,
+    roomKeyCipher,
+    created_at: nowSec(),
+  });
+
+  // publish resolved marker (optional) so other devices can clear their pending list deterministically
+  await publishKind(sw, 'pair_resolved', { requestId, status: 'approved', created_at: nowSec() });
+
+  await addNotif(sw, makeNotif({
+    kind: 'pairing',
+    title: 'Device approved',
+    body: req.deviceLabel ? `Approved: ${req.deviceLabel}` : 'Approved a device',
+    data: { requestId },
+  }));
+
+  emit(sw, { type: 'notify' });
+  return { ok: true };
+}
+
+async function rejectPair(sw, { requestId }) {
+  const identity = await getIdentity();
+  const keys = await ensureNostrKeys(sw);
+  const reqs = await getPairReqs();
+  const req = reqs.find((r) => r.id === requestId);
+  if (!req) return { ok: false, error: 'request_not_found' };
+  if (req.status !== 'pending') return { ok: true, already: true };
+
+  await resolvePairReq(sw, requestId, 'rejected');
+
+  await publishKind(sw, 'pair_reject', {
+    requestId,
+    identityLabel: identity.label,
+    devicePk: req.devicePk,
+    deviceDid: req.deviceDid,
+    approverPk: keys.pubkey,
+    created_at: nowSec(),
+  });
+
+  await publishKind(sw, 'pair_resolved', { requestId, status: 'rejected', created_at: nowSec() });
+
+  await addNotif(sw, makeNotif({
+    kind: 'pairing',
+    title: 'Device rejected',
+    body: req.deviceLabel ? `Rejected: ${req.deviceLabel}` : 'Rejected a device',
+    data: { requestId },
+  }));
+
+  emit(sw, { type: 'notify' });
+  return { ok: true };
+}
+
+async function dismissPair(sw, { requestId }) {
+  await dismissPairReq(self, requestId);
+  return { ok: true };
+}
+
+// ------------------------
+// RPC
+// ------------------------
+async function handleCall(sw, method, params) {
+  switch (method) {
+    case 'device.getState': {
+      const device = await getDevice();
+      const keys = await ensureNostrKeys(sw);
+      return { did: device?.did || '', didMethod: device?.didMethod || 'soft', pk: keys.pubkey };
+    }
+    case 'device.getLabel': {
+      const device = await getDevice();
+      return { label: device?.label || '' };
+    }
+    case 'device.setLabel': {
+      const device = await getDevice();
+      device.label = String(params?.label || '');
+      await setDevice(device);
+
+      // publish to room (encrypted) so others can see updated label
+      const keys = await ensureNostrKeys(sw);
+      await publishKind(sw, 'device_label_set', { pk: keys.pubkey, did: device.did, label: device.label });
+
+      return { ok: true };
+    }
+    case 'identity.get': {
+      return await getIdentity();
+    }
+    case 'identity.create': {
+      return await createIdentity(sw, params || {});
+    }
+    case 'identity.requestPair': {
+      return await requestPair(sw, params || {});
+    }
+    case 'pairing.list': {
+      return await listPendingPairReqs();
+    }
+    case 'pairing.approve': {
+      return await approvePair(sw, params || {});
+    }
+    case 'pairing.reject': {
+      return await rejectPair(sw, params || {});
+    }
+    case 'pairing.dismiss': {
+      return await dismissPairReq(sw, params?.requestId);
+    }
+    case 'profile.get': {
+      return await getProfile();
+    }
+    case 'profile.set': {
+      const next = { name: String(params?.name || ''), about: String(params?.about || '') };
+      await setProfile(next);
+
+      // publish to room (encrypted)
+      await publishKind(sw, 'profile_set', next);
+
+      return { ok: true };
+    }
+    case 'notifications.list': {
+      return await getNotifs();
+    }
+    case 'notifications.markRead': {
+      const id = params?.id;
+      const list = await getNotifs();
+      for (const n of list) if (n.id === id) n.read = true;
+      await setNotifs(list);
+      emit(sw, { type: 'notify' });
+      return { ok: true };
+    }
+    case 'notifications.clear': {
+      await clearNotifs(sw);
+      return { ok: true };
+    }
+    case 'relay.rx': {
+      if (typeof params?.data === 'string') await handleRelayMessage(sw, params.data);
+      return { ok: true };
+    }
+    case 'relay.status': {
+      // UI informs SW about worker connection state for indicator
+      setRelayState(sw, {
+        state: params?.state || relayState.state,
+        url: params?.url || relayState.url,
+        ok: true,
+        code: params?.code ?? null,
+        reason: params?.reason ?? '',
+      });
+      return { ok: true };
+    }
+    default:
+      throw new Error(`unknown method: ${method}`);
+  }
+}
+
+// ------------------------
+// SW lifecycle
+// ------------------------
+self.addEventListener('install', (e) => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+
+self.addEventListener('message', (e) => {
+  const msg = e.data || {};
+  if (msg.type !== 'req') return;
+  const id = msg.id;
+  const method = msg.method;
+  const params = msg.params || {};
+  Promise.resolve()
+    .then(() => handleCall(self, method, params))
+    .then((result) => e.source?.postMessage({ type: 'res', id, ok: true, result }))
+    .catch((err) => e.source?.postMessage({ type: 'res', id, ok: false, error: String(err?.message || err) }));
+});
+
+// ------------------------
+// Boot: ensure device + keys exist
+// ------------------------
+(async () => {
+  const device = (await getDevice()) || {
+    did: `did:soft:${crypto.getRandomValues(new Uint32Array(4)).join('')}`,
+    didMethod: 'soft',
+    pk: '',
+    label: '',
+    created_at: nowSec(),
+  };
+  await setDevice(device);
+  // generate nostr keys if needed
+  await ensureNostrKeys(self);
+  log(self, 'identity daemon online');
+})();
