@@ -2,160 +2,185 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Identity / Device Link</title>
+  <title>Constitute</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="app.css" />
-  <!-- nostr-tools UMD: exposes window.NostrTools -->
-  <script src="https://unpkg.com/nostr-tools@1.17.0/lib/nostr.bundle.js"></script>
 </head>
 <body>
-<header>
-  <div>
-    <h1>Identity / Device Link</h1>
-    <div class="header-sub">
-      <span id="panePath">Onboarding</span>
-      <span id="status"></span>
+<header class="topbar">
+  <div class="left">
+    <div class="title">
+      <div class="appname">
+        Constitute
+
+        <span id="connWrap" class="connWrap">
+          <span id="connDot" class="connDot conn-off" aria-label="Connection status"></span>
+
+          <!-- immediate hover popover -->
+          <div id="connPopover" class="popover hidden" role="status" aria-live="polite">
+            <div class="popoverTitle">Status</div>
+            <div class="popoverRow"><span class="muted">Relay</span><span id="popRelay">offline</span></div>
+            <div class="popoverRow"><span class="muted">Identity</span><span id="popDaemon">unknown</span></div>
+          </div>
+        </span>
+
+      </div>
+      <div id="panePath" class="panePath">Home</div>
     </div>
   </div>
-  <div style="position: relative;">
-    <button id="btnMenu" type="button">☰</button>
-    <div id="menuDropdown">
-      <button type="button" data-activity="home">Home</button>
-      <button type="button" data-activity="settings">Settings</button>
+
+  <div class="right">
+    <button id="btnBell" class="iconbtn" title="Notifications" aria-label="Notifications">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 22a2 2 0 0 0 2-2H10a2 2 0 0 0 2 2Zm6-6V11a6 6 0 1 0-12 0v5L4 18v1h16v-1l-2-2Z"/>
+      </svg>
+      <span id="notifDot" class="dot hidden"></span>
+    </button>
+
+    <button id="btnMenu" class="iconbtn" title="Menu" aria-label="Menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
+
+    <div id="notifMenu" class="dropdown hidden" role="menu" aria-label="Notifications">
+      <div class="dropdownHeader">Notifications</div>
+      <div id="notifList" class="dropdownList"></div>
+      <div class="dropdownFooter">
+        <button id="btnNotifClear" class="linkbtn" type="button">Clear notifications</button>
+      </div>
     </div>
   </div>
 </header>
 
-<div class="app">
-  <div id="mainPane">
-    <!-- onboarding (no owner association yet) -->
-    <div id="onboardView">
-      <h2>Get started</h2>
-      <div class="small">
-        This browser/device will have its own device identity (DID). You can secure
-        it with a platform-backed key (TPM / Secure Enclave) where supported.
-      </div>
+<div id="drawerBackdrop" class="backdrop hidden"></div>
 
-      <div class="section">
-        <h3>Device security (recommended)</h3>
-        <div class="small">
-          Current device security:
-          <span id="onboardSecurityStatus" class="danger">
-            software key only (upgrade strongly recommended)
-          </span>
-        </div>
-        <div class="row" style="margin-top: 0.5rem;">
-          <button id="btnOnboardSecureDevice" type="button">
-            Secure this device with platform key
-          </button>
-        </div>
-        <div class="small">
-          If this device cannot use a platform authenticator (WebAuthn), you can skip
-          and continue with a software-only key. You can also upgrade later from
-          Settings.
-        </div>
-      </div>
-
-      <div class="choice-row">
-        <div class="choice">
-          <h3>Create Identity</h3>
-          <p>
-            Create a new owner identity for yourself. This becomes your
-            profile / wallet-like state shared across your devices.
-          </p>
-          <button id="btnCreateOwner" type="button">Create new owner</button>
-        </div>
-
-        <div class="choice">
-          <h3>Associate Device</h3>
-          <p>
-            Add this device to an existing owner identity by searching for its
-            display name and confirming a pairing code on both devices.
-          </p>
-          <label for="ownerNameSearch">Owner name (display name)</label>
-          <input id="ownerNameSearch" type="text" placeholder="existing owner name" />
-          <button id="btnRequestPair" type="button">Request pairing</button>
-
-          <label>Pairing code</label>
-          <div class="small" id="pairCodeDisplay">(none)</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Home activity -->
-    <div id="homeView" class="hidden">
-      <div class="placeholder">
-        Home activity.<br/><br/>
-        This is where you’d plug in swarmpads, dashboards, session lists, etc.,
-        using the identity and device roster wired up in Settings.
-      </div>
-    </div>
-
-    <!-- Settings activity -->
-    <div id="settingsView" class="hidden">
-      <div class="section">
-        <h2>Owner profile</h2>
-        <div class="small">
-          This profile is encrypted and synced between all devices associated with this owner.
-        </div>
-        <label for="displayName">display name (owner)</label>
-        <input id="displayName" type="text" placeholder="handle, alias, etc." />
-
-        <label for="bio">bio / notes</label>
-        <textarea id="bio"
-          placeholder="short description, wallet notes, etc."></textarea>
-
-        <label>owner identity link (optional, out-of-band)</label>
-        <div class="row">
-          <input id="identityUrl" type="text" readonly />
-          <button id="copyLink" type="button">copy</button>
-        </div>
-        <div class="small">
-          This link encodes the identity secret in the hash fragment. Sharing it
-          gives full access to the owner state.
-        </div>
-      </div>
-
-      <div class="section">
-        <h2>Device</h2>
-        <label for="deviceName">device name (visible to signer)</label>
-        <input id="deviceName" type="text" placeholder="e.g. Kyle's laptop" />
-
-        <label>device pubkey (nostr)</label>
-        <div class="small" id="devicePk"></div>
-
-        <label>device DID</label>
-        <div class="row">
-          <div class="small" id="deviceDid" style="flex:1; word-break:break-all;"></div>
-          <button id="btnUpgradeDid" type="button">upgrade to platform key</button>
-        </div>
-        <div class="small">
-          Devices without a platform-backed DID are marked in
-          <span class="danger">red</span> here. Upgrading binds this device to a
-          hardware-backed WebAuthn credential where supported.
-        </div>
-      </div>
-
-      <div class="section">
-        <h2>Devices in identity</h2>
-        <div class="small" id="devicesList">(none recorded yet)</div>
-      </div>
-
-      <div class="section">
-        <h2>Pending pairing requests</h2>
-        <div class="small">
-          When a new device searches for your owner name, you'll see a request here
-          with a 6-digit code. Only approve if the codes match on both screens.
-        </div>
-        <div id="pairRequests"></div>
-      </div>
-    </div>
+<aside id="drawer" class="drawer hidden" aria-label="Navigation drawer">
+  <div class="drawerHeader">
+    <div class="drawerTitle">Activities</div>
+    <button id="btnDrawerClose" class="iconbtn" aria-label="Close">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
   </div>
-</div>
 
-<script type="module">
-  import { initIdentityApp } from './identity/identityApp.js';
-  initIdentityApp();
-</script>
+  <nav class="drawerNav">
+    <button class="navitem" data-activity="home">Home</button>
+    <button class="navitem" data-activity="settings">Settings</button>
+  </nav>
+</aside>
+
+<main class="app">
+  <section id="viewHome" class="view">
+    <div class="placeholder">Home</div>
+  </section>
+
+  <section id="viewSettings" class="view hidden">
+    <div class="tabs">
+      <button type="button" class="tab tab-active" data-tab="profile">Profile</button>
+      <button type="button" class="tab" data-tab="devices">Devices</button>
+      <button type="button" class="tab" data-tab="pairing">Pairing</button>
+      <button type="button" class="tab" data-tab="identity">Identity</button>
+    </div>
+
+    <div id="tab_profile" class="tabpane">
+      <h2>Profile</h2>
+
+      <label for="profileName">Display name</label>
+      <input id="profileName" type="text" placeholder="name" />
+
+      <label for="profileAbout">About</label>
+      <textarea id="profileAbout" rows="4" placeholder="about…"></textarea>
+
+      <div class="row">
+        <button id="btnSaveProfile" type="button">Save Profile</button>
+      </div>
+    </div>
+
+    <div id="tab_devices" class="tabpane hidden">
+      <h2>Devices</h2>
+
+      <div class="kv">
+        <div class="k">This device DID</div>
+        <div class="v" id="deviceDid"></div>
+      </div>
+
+      <label for="deviceLabel">This device label</label>
+      <input id="deviceLabel" type="text" placeholder="device label" />
+
+      <div class="row">
+        <button id="btnSaveDeviceLabel" type="button">Save Device Label</button>
+      </div>
+
+      <h3>Known devices</h3>
+      <div id="deviceList" class="list"></div>
+    </div>
+
+    <div id="tab_pairing" class="tabpane hidden">
+      <h2>Pairing</h2>
+
+      <h3>Pending requests</h3>
+      <div id="pairingList" class="list"></div>
+      <div id="pairingEmpty" class="small muted">No pending pairing requests.</div>
+    </div>
+
+    <div id="tab_identity" class="tabpane hidden">
+      <h2>Identity</h2>
+
+      <div class="kv">
+        <div class="k">Identity label</div>
+        <div class="v" id="identityLabel"></div>
+      </div>
+
+      <div class="kv">
+        <div class="k">Identity ID</div>
+        <div class="v" id="identityId"></div>
+      </div>
+
+      <div class="kv">
+        <div class="k">Linked</div>
+        <div class="v" id="identityLinked"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="viewOnboard" class="view hidden">
+    <div class="card">
+      <div class="small"><strong>Step 1/2:</strong> device • Step 2/2: identity</div>
+
+      <div id="obStepDevice" class="wizard-step">
+        <h2>Set up this device</h2>
+        <div class="small">Device DID: <span id="deviceDidSummary">(initializing…)</span></div>
+        <div class="small">Security: <span id="deviceSecuritySummary">checking…</span></div>
+        <div class="row" style="margin-top: 0.75rem;">
+          <button id="btnObDeviceContinue" type="button">Continue</button>
+        </div>
+      </div>
+
+      <div id="obStepIdentity" class="wizard-step hidden">
+        <div class="small">Step 1/2: device • <strong>Step 2/2:</strong> identity</div>
+
+        <div class="tabs">
+          <button type="button" class="tab tab-active" data-mode="new">New identity</button>
+          <button type="button" class="tab" data-mode="existing">Existing identity</button>
+        </div>
+
+        <label for="obDeviceLabel">Device label (required)</label>
+        <input id="obDeviceLabel" type="text" placeholder="device label" />
+
+        <label for="obIdentityLabel">Identity label</label>
+        <input id="obIdentityLabel" type="text" placeholder="identity label" />
+
+        <div class="row" style="margin-top: 0.75rem;">
+          <button id="btnObIdentityContinue" type="button">Continue</button>
+        </div>
+
+        <div id="existingInfo" class="small muted hidden" style="margin-top: 0.75rem;">
+          Waiting for approval from another device…
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="./app.js"></script>
 </body>
 </html>

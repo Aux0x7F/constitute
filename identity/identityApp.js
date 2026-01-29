@@ -37,8 +37,16 @@ export function initIdentityApp() {
   const homeView        = document.getElementById('homeView');
   const settingsView    = document.getElementById('settingsView');
 
+  const obStep1Choice   = document.getElementById('obStep1Choice');
+  const obStep2Security = document.getElementById('obStep2Security');
+  const obStep3Create   = document.getElementById('obStep3Create');
+  const obStep3Associate= document.getElementById('obStep3Associate');
+
   const onboardSecurityStatus = document.getElementById('onboardSecurityStatus');
-  const btnOnboardSecure      = document.getElementById('btnOnboardSecureDevice');
+  const btnObChooseCreate   = document.getElementById('btnObChooseCreate');
+  const btnObChooseAssociate= document.getElementById('btnObChooseAssociate');
+  const btnObSecureNow      = document.getElementById('btnObSecureNow');
+  const btnObSkipSecurity   = document.getElementById('btnObSkipSecurity');
 
   const btnCreateOwner  = document.getElementById('btnCreateOwner');
   const ownerNameInput  = document.getElementById('ownerNameSearch');
@@ -68,7 +76,6 @@ export function initIdentityApp() {
   function refreshSecurityUI() {
     const isHw = device.didMethod === 'webauthn';
 
-    // onboard security text
     if (isHw) {
       onboardSecurityStatus.textContent = 'platform-backed key (recommended)';
       onboardSecurityStatus.classList.remove('danger');
@@ -77,16 +84,52 @@ export function initIdentityApp() {
       onboardSecurityStatus.classList.add('danger');
     }
 
-    // device DID display
     deviceDidEl.textContent = device.did || '(no DID)';
     deviceDidEl.classList.toggle('device-did-soft', !isHw);
     deviceDidEl.classList.toggle('device-did-hw', !!isHw);
-
-    // hide upgrade button if already hardware-backed
     btnUpgradeDid.style.display = isHw ? 'none' : 'inline-block';
   }
 
   refreshSecurityUI();
+
+  // Wizard state
+  let onboardingMode = null; // 'create' | 'associate'
+  let onboardingStep = 1;    // 1,2,3,4
+
+  function setPanePathForWizard(step) {
+    let label = 'Onboarding';
+    if (step === 1) {
+      label = 'Onboarding / Step 1: choose action';
+    } else if (step === 2) {
+      label = 'Onboarding / Step 2: device security';
+    } else if (step === 3 && onboardingMode === 'create') {
+      label = 'Onboarding / Step 3: create owner';
+    } else if (step === 3 && onboardingMode === 'associate') {
+      label = 'Onboarding / Step 3: associate device';
+    }
+    panePathEl.textContent = label;
+  }
+
+  function showWizardStep(step) {
+    onboardingStep = step;
+    obStep1Choice.classList.add('hidden');
+    obStep2Security.classList.add('hidden');
+    obStep3Create.classList.add('hidden');
+    obStep3Associate.classList.add('hidden');
+
+    if (step === 1) {
+      obStep1Choice.classList.remove('hidden');
+    } else if (step === 2) {
+      obStep2Security.classList.remove('hidden');
+    } else if (step === 3) {
+      if (onboardingMode === 'create') {
+        obStep3Create.classList.remove('hidden');
+      } else if (onboardingMode === 'associate') {
+        obStep3Associate.classList.remove('hidden');
+      }
+    }
+    setPanePathForWizard(step);
+  }
 
   // pane / activity switching
   function showOnboarding() {
@@ -94,7 +137,8 @@ export function initIdentityApp() {
     homeView.classList.add('hidden');
     settingsView.classList.add('hidden');
     btnMenu.style.display = 'none';
-    panePathEl.textContent = 'Onboarding';
+    onboardingMode = null;
+    showWizardStep(1);
   }
   function showActivity(activity) {
     onboardView.classList.add('hidden');
@@ -166,7 +210,6 @@ export function initIdentityApp() {
     const me = devices.find(d => d.pk === device.pk);
     deviceNameEl.value = me && me.name ? me.name : '';
     if (me && me.did && device.did !== me.did) {
-      // prefer profile DID if different (e.g., updated from another session)
       device.did = me.did;
       refreshSecurityUI();
     }
@@ -210,7 +253,6 @@ export function initIdentityApp() {
       addPairRequestToUI(pairingId, code, devicePk);
     },
     onPairingComplete: ({ identityId, identityKeyB64 }) => {
-      // accept pairing; set identity + profile
       loadAssociationFromHash(`#id=${encodeURIComponent(identityId)}&k=${encodeURIComponent(identityKeyB64)}`);
       setProfile(null);
       loadProfileFromCache(device.pk, device.did);
@@ -313,9 +355,9 @@ export function initIdentityApp() {
     scheduleSave();
   });
 
-  // WebAuthn upgrade buttons (onboarding + settings)
+  // WebAuthn upgrade (both settings + onboarding)
 
-  async function handleUpgradeDidClick() {
+  async function upgradeDeviceDidAndPersist() {
     try {
       setStatus('requesting platform authenticator…');
       const upgraded = await upgradeDeviceDidWithWebAuthn();
@@ -336,16 +378,56 @@ export function initIdentityApp() {
       }
 
       setStatus('device DID upgraded to platform key');
+      return true;
     } catch (err) {
       console.error('upgrade DID failed', err);
       setStatus(err && err.message ? err.message : 'upgrade failed');
+      return false;
     }
   }
 
-  btnUpgradeDid.addEventListener('click', handleUpgradeDidClick);
-  btnOnboardSecure.addEventListener('click', handleUpgradeDidClick);
+  btnUpgradeDid.addEventListener('click', () => {
+    upgradeDeviceDidAndPersist();
+  });
 
-  // pairing flows
+  function advanceAfterSecurityStep() {
+    // Step 2 -> Step 3 (create or associate)
+    if (onboardingMode === 'create') {
+      showWizardStep(3);
+    } else if (onboardingMode === 'associate') {
+      showWizardStep(3); // same step index, different content
+    } else {
+      // no mode chosen? fall back to step 1
+      showWizardStep(1);
+    }
+  }
+
+  btnObSecureNow.addEventListener('click', async () => {
+    const ok = await upgradeDeviceDidAndPersist();
+    if (!ok) {
+      setStatus('could not secure with platform key; continuing with software key');
+    }
+    advanceAfterSecurityStep();
+  });
+
+  btnObSkipSecurity.addEventListener('click', () => {
+    setStatus('continuing with software-only key on this device');
+    advanceAfterSecurityStep();
+  });
+
+  // Wizard step 1 actions
+
+  btnObChooseCreate.addEventListener('click', () => {
+    onboardingMode = 'create';
+    showWizardStep(2);
+  });
+
+  btnObChooseAssociate.addEventListener('click', () => {
+    onboardingMode = 'associate';
+    showWizardStep(2);
+  });
+
+  // pairing flows (wizard step 3 associate)
 
   btnRequestPair.addEventListener('click', () => {
     const name = ownerNameInput.value.trim();
