@@ -5,6 +5,7 @@ import { nip04Encrypt } from './nostr.js';
 import { ensureDevice } from './deviceStore.js';
 import { getIdentity, setIdentity } from './identityStore.js';
 import { publishAppEvent } from './relayOut.js';
+import { blockedAdd } from './blocklist.js';
 
 export async function revokeDeviceAndRotate(sw, targetPk) {
   const ident = await getIdentity();
@@ -12,21 +13,32 @@ export async function revokeDeviceAndRotate(sw, targetPk) {
     throw new Error('no linked identity');
   }
 
-  // Remove target
+  // Persist blacklist entry locally first.
+  await blockedAdd({ pk: targetPk, reason: 'revoked' });
+
+  // Remove target from known devices.
   ident.devices = (ident.devices || []).filter(d => d.pk !== targetPk);
 
-  // Rotate key
+  // Rotate key.
   ident.roomKeyB64 = b64url(randomBytes(32));
   await setIdentity(ident);
 
-  // Notify all devices (including revoked, so everyone converges)
+  // Notify all devices (including revoked, so everyone converges).
   await publishAppEvent(sw, {
     type: 'device_revoked',
     identity: ident.label,
     targetPk,
   }, [['i', ident.label]]);
 
-  // Push new room key to remaining devices via nip04 encrypted envelope
+  // Also broadcast a block signal so other devices can add to their local blacklist.
+  await publishAppEvent(sw, {
+    type: 'device_blocked',
+    identity: ident.label,
+    targetPk,
+    reason: 'revoked',
+  }, [['i', ident.label]]);
+
+  // Push new room key to remaining devices via nip04 encrypted envelope.
   const dev = await ensureDevice();
   const payload = JSON.stringify({
     identityId: ident.id,

@@ -1,6 +1,7 @@
 // FILE: identity/sw/uiBus.js
 
 export function emit(sw, evt) {
+  if (!sw?.clients?.matchAll) return;
   sw.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
     for (const c of clients) c.postMessage({ type: 'evt', evt });
   });

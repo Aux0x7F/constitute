@@ -21,6 +21,11 @@ export async function notifMarkRead(id) {
   await kvSet('notifications', list);
 }
 
+export async function notifRemove(id) {
+  const list = (await kvGet('notifications')) || [];
+  await kvSet('notifications', (Array.isArray(list) ? list : []).filter(n => n.id !== id));
+}
+
 export async function notifClear() {
   await kvSet('notifications', []);
 }

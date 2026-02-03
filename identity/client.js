@@ -1,4 +1,10 @@
 // identity/client.js
+// Client-side RPC wrapper for the identity Service Worker.
+//
+// IMPORTANT: We serialize RPC calls.
+// The Service Worker is single-threaded and uses IndexedDB; sending many
+// concurrent RPCs can cause contention and apparent hangs/timeouts.
+
 export class IdentityClient {
   constructor({ onEvent } = {}) {
     this.onEvent = onEvent || (() => {});
@@ -6,10 +12,13 @@ export class IdentityClient {
     this._pending = new Map();
     this._readyPromise = null;
 
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.addEventListener('message', (e) => this._onMessage(e));
-      navigator.serviceWorker.addEventListener('controllerchange', () => {
-        this.onEvent({ type: 'log', message: 'service worker controllerchange' });
+    // Serialize calls to prevent SW/IDB contention.
+    this._queue = Promise.resolve();
+
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", (e) => this._onMessage(e));
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        this.onEvent({ type: "log", message: "service worker controllerchange" });
       });
     }
   }
@@ -18,54 +27,57 @@ export class IdentityClient {
     if (this._readyPromise) return this._readyPromise;
 
     this._readyPromise = (async () => {
-      if (!('serviceWorker' in navigator)) {
-        throw new Error('Service Worker not supported in this browser');
+      if (!("serviceWorker" in navigator)) {
+        throw new Error("Service Worker not supported in this browser");
       }
 
-      // 1) Ensure SW is registered (your repo did not register it anywhere).
-      //    IMPORTANT: sw.js is an ES module (has import statements), so we MUST register as type:"module".
-      let reg = await navigator.serviceWorker.getRegistration('./');
-
-      // Some browsers return null unless you query without scope param; do both.
+      // Ensure SW is registered. sw.js is an ES module.
+      let reg = await navigator.serviceWorker.getRegistration("./");
       if (!reg) reg = await navigator.serviceWorker.getRegistration();
 
       if (!reg) {
-        this.onEvent({ type: 'log', message: 'registering service worker ./sw.js (module)' });
-        try {
-          reg = await navigator.serviceWorker.register('./sw.js', {
-            scope: './',
-            type: 'module',
-          });
-        } catch (e) {
-          // Common causes: not on http(s)/localhost, wrong path, browser lacks module SW support
-          throw new Error(`Service Worker registration failed: ${String(e?.message || e)}`);
-        }
+        this.onEvent({ type: "log", message: "registering service worker ./sw.js (module)" });
+        reg = await navigator.serviceWorker.register("./sw.js", {
+          scope: "./",
+          type: "module",
+        });
       }
 
-      // 2) Wait for activation/ready
       await navigator.serviceWorker.ready;
 
-      // 3) Ensure we have a controller (first load needs a reload sometimes; we wait rather than blame server)
+      // First load after registration may need a controller; wait a bit.
       await this._waitForController(9000);
-
       return reg;
     })();
 
     return this._readyPromise;
   }
 
-  async call(method, params = {}, { timeoutMs } = {}) {
-    // Default timeout: first load can be slower
-    const t = timeoutMs ?? 6000;
+  /**
+   * Enqueue an RPC call (serialized).
+   */
+  call(method, params = {}, { timeoutMs } = {}) {
+    const run = () => this._callOnce(method, params, { timeoutMs });
+
+    const p = this._queue.then(run);
+
+    // Keep the queue alive even if a call fails.
+    this._queue = p.catch(() => {});
+    return p;
+  }
+
+  async _callOnce(method, params = {}, { timeoutMs } = {}) {
+    // Default timeout: be generous for IDB/crypto + first-load conditions.
+    const t = timeoutMs ?? 15000;
 
     await this.ready();
 
     if (!navigator.serviceWorker.controller) {
-      await this._waitForController(6000);
+      await this._waitForController(8000);
     }
 
     const id = this._reqId++;
-    const payload = { type: 'req', id, method, params };
+    const payload = { type: "req", id, method, params };
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -89,20 +101,21 @@ export class IdentityClient {
     const msg = e.data || {};
 
     // daemon events
-    if (msg.type === 'evt' && msg.evt) {
+    if (msg.type === "evt" && msg.evt) {
       this.onEvent(msg.evt);
       return;
     }
 
     // rpc responses
-    if (msg.type === 'res') {
+    if (msg.type === "res") {
       const p = this._pending.get(msg.id);
       if (!p) return;
+
       clearTimeout(p.timer);
       this._pending.delete(msg.id);
 
       if (msg.ok) p.resolve(msg.result);
-      else p.reject(new Error(msg.error || 'unknown error'));
+      else p.reject(new Error(msg.error || "unknown error"));
     }
   }
 
@@ -120,17 +133,17 @@ export class IdentityClient {
         }
         if (Date.now() - start > timeoutMs) {
           cleanup();
-          reject(new Error('service worker controller not available'));
+          reject(new Error("service worker controller not available"));
         }
       };
 
       const onChange = () => tick();
       const cleanup = () => {
         clearInterval(iv);
-        navigator.serviceWorker.removeEventListener('controllerchange', onChange);
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
       };
 
-      navigator.serviceWorker.addEventListener('controllerchange', onChange);
+      navigator.serviceWorker.addEventListener("controllerchange", onChange);
       const iv = setInterval(tick, 100);
       tick();
     });
