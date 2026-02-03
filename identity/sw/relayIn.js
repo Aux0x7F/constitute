@@ -9,6 +9,9 @@ import { getSubId, getAppTag, subscribeOnRelayOpen as relaySubscribeOnRelayOpen 
 import { log, pokeUi } from './uiBus.js';
 import { blockedAdd, blockedIs, blockedRemove } from './blocklist.js';
 import { kvGet, kvSet } from './idb.js';
+import { directoryUpsert } from './directory.js';
+import { chatAdd } from './chatStore.js';
+import { isNeighborhoodJoined } from './neighborhood.js';
 
 const REPLAY_WINDOW_SEC = 10 * 60;
 const REPLAY_SKEW_SEC = 2 * 60;
@@ -119,6 +122,25 @@ export async function handleRelayFrame(sw, raw) {
     return;
   }
 
+  // --- Neighborhood presence (directory) ---
+  if (payload.type === 'neighborhood_presence') {
+    if (!ident?.linked || !ident?.id) return;
+    const nb = String(payload.neighborhood || '').trim();
+    if (!nb) return;
+    const ok = await isNeighborhoodJoined(ident, nb);
+    if (!ok) return;
+    if (payload.identityId && payload.identityId === ident.id) return;
+    await directoryUpsert({
+      identityId: String(payload.identityId || '').trim(),
+      identityLabel: String(payload.identityLabel || '').trim(),
+      neighborhood: nb,
+      lastSeen: Date.now(),
+      devicePk: String(payload.devicePk || '').trim(),
+    });
+    pokeUi(sw);
+    return;
+  }
+
   // --- Identity label update ---
   if (payload.type === 'identity_label_update') {
     if (!ident?.linked || !ident?.label) return;
@@ -146,6 +168,30 @@ export async function handleRelayFrame(sw, raw) {
       }
     }
     await setIdentity(ident);
+    pokeUi(sw);
+    return;
+  }
+
+  // --- Chat message ---
+  if (payload.type === 'chat_message') {
+    // TODO: Messages not propagating to receiving devices reliably; verify relay subscription,
+    // queue id routing, and directory population timing when messages arrive.
+    if (!ident?.linked || !ident?.id) return;
+    const toId = String(payload.toIdentityId || '').trim();
+    const fromId = String(payload.identityId || '').trim();
+    if (!toId || !fromId) return;
+    if (toId !== ident.id && fromId !== ident.id) return;
+    const qid = String(payload.queueId || '').trim();
+    if (!qid) return;
+    await chatAdd(qid, {
+      id: String(ev.id || ''),
+      queueId: qid,
+      fromIdentityId: fromId,
+      toIdentityId: toId,
+      fromLabel: String(payload.identity || '').trim(),
+      body: String(payload.body || ''),
+      ts: Number(payload.ts || Date.now()),
+    });
     pokeUi(sw);
     return;
   }

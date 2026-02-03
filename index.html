@@ -61,6 +61,8 @@
 
   <nav class="drawerNav">
     <button class="navbtn" data-activity="home">Home</button>
+    <button class="navbtn" data-activity="messages">Messages</button>
+    <button class="navbtn" data-activity="directory">Directory</button>
     <button class="navbtn" data-activity="settings">Settings</button>
     <button class="navbtn" data-activity="onboarding">Onboarding</button>
   </nav>
@@ -87,6 +89,56 @@
         <div class="k">Linked</div>
         <div class="v" id="identityLinkedSummary"></div>
       </div>
+    </div>
+  </section>
+
+  <section id="viewMessages" class="activity hidden">
+    <h1>Messages</h1>
+    <div class="row">
+      <button id="btnNewConversation" type="button">New conversation</button>
+      <input id="msgSearch" type="text" placeholder="Search directory" />
+    </div>
+    <div class="row">
+      <div id="chatLink" class="mono"></div>
+      <button id="btnCopyChatLink" type="button">Copy my chat link</button>
+    </div>
+    <div id="messagesList" class="list"></div>
+
+    <div id="newConversationPanel" class="card hidden">
+      <div class="cardTitle">Start a conversation</div>
+      <div id="directoryPickerList" class="list"></div>
+    </div>
+
+    <div id="chatPanel" class="card hidden">
+      <div id="chatTitle" class="cardTitle">Chat</div>
+      <div id="chatMessages" class="chatMessages"></div>
+      <div class="row">
+        <input id="chatInput" type="text" placeholder="Type a message…" />
+        <button id="chatSend" type="button">Send</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="viewDirectory" class="activity hidden">
+    <h1>Directory</h1>
+
+    <div class="card">
+      <div class="cardTitle">Neighborhoods</div>
+      <div class="row">
+        <input id="neighborhoodName" type="text" placeholder="Neighborhood name" />
+        <button id="btnCreateNeighborhood" type="button">Create</button>
+      </div>
+      <div class="small muted">Share the link below to invite others.</div>
+      <div class="row">
+        <div id="neighborhoodLink" class="mono"></div>
+        <button id="btnCopyNeighborhoodLink" type="button">Copy link</button>
+      </div>
+      <div id="neighborhoodsList" class="list"></div>
+    </div>
+
+    <div class="card">
+      <div class="cardTitle">Members</div>
+      <div id="neighborhoodMembersList" class="list"></div>
     </div>
   </section>
 
@@ -133,6 +185,7 @@
       <h3>Blocked devices</h3>
       <div id="blockedList" class="list"></div>
     </div>
+
 
     <div id="tab_pairing" class="tabpane hidden">
       <h2>Pairing</h2>

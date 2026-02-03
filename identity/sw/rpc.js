@@ -1,7 +1,7 @@
 // FILE: identity/sw/rpc.js
 
 import { kvSet } from './idb.js';
-import { randomBytes, b64url } from './crypto.js';
+import { randomBytes, b64url, sha256B64Url } from './crypto.js';
 import { ensureDevice, setThisDeviceLabel } from './deviceStore.js';
 import { getIdentity, setIdentity, getProfile, setProfile, setPendingJoinIdentityLabel } from './identityStore.js';
 import { notifList, notifMarkRead, notifRemove, notifClear } from './notifs.js';
@@ -12,9 +12,18 @@ import { nip04Encrypt } from './nostr.js';
 import { revokeDeviceAndRotate } from './revoke.js';
 import { handleRelayFrame } from './relayIn.js';
 import { blockedList, blockedRemove } from './blocklist.js';
+import { directoryList } from './directory.js';
+import { chatAdd, chatList } from './chatStore.js';
+import { listNeighborhoods, addNeighborhood, joinNeighborhood, publishNeighborhoodPresence } from './neighborhood.js';
 
 function makePairCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
+}
+
+async function chatQueueId(a, b) {
+  const s = [String(a || ''), String(b || '')].sort().join('|');
+  const h = await sha256B64Url(s);
+  return h.slice(0, 20);
 }
 
 export async function handleRpc(sw, method, params, getRelayState, setRelayState) {
@@ -102,6 +111,40 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return ident || { id: '', label: '', linked: false, devices: [], roomKeyB64: '' };
   }
 
+  if (method === 'neighborhoods.list') {
+    const ident = await getIdentity();
+    return await listNeighborhoods(ident || {});
+  }
+
+  if (method === 'neighborhoods.add') {
+    const name = String(params?.name || '').trim();
+    if (!name) throw new Error('missing name');
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    const dev = await ensureDevice();
+    const res = await addNeighborhood(ident, name);
+    if (res?.key) await publishNeighborhoodPresence(sw, ident, dev, res.key).catch(() => {});
+    pokeUi(sw);
+    return res;
+  }
+
+  if (method === 'neighborhoods.join') {
+    const key = String(params?.key || '').trim();
+    const name = String(params?.name || '').trim();
+    if (!key) throw new Error('missing key');
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    const dev = await ensureDevice();
+    const res = await joinNeighborhood(ident, key, name);
+    if (res?.key) await publishNeighborhoodPresence(sw, ident, dev, res.key).catch(() => {});
+    pokeUi(sw);
+    return res;
+  }
+
+  if (method === 'directory.list') {
+    return await directoryList();
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();
@@ -136,6 +179,11 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       deviceLabel,
     }, [['i', identityLabel]]);
 
+    const nbs = await listNeighborhoods(ident || {});
+    for (const n of nbs) {
+      await publishNeighborhoodPresence(sw, ident, dev, n.key).catch(() => {});
+    }
+
     status(sw, 'identity created');
     pokeUi(sw);
     return { ok: true };
@@ -151,6 +199,12 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const prev = ident.label || '';
     ident.label = identityLabel;
     await setIdentity(ident);
+
+    const dev = await ensureDevice();
+    const nbs = await listNeighborhoods(ident || {});
+    for (const n of nbs) {
+      await publishNeighborhoodPresence(sw, ident, dev, n.key).catch(() => {});
+    }
 
     await publishAppEvent(sw, {
       type: 'identity_label_update',
@@ -249,7 +303,12 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     }
     if (state === 'open') {
       const ident = await getIdentity();
+      const dev = await ensureDevice();
       await subOpen(sw, ident, (m) => log(sw, m));
+      const nbs = await listNeighborhoods(ident || {});
+      for (const n of nbs) {
+        await publishNeighborhoodPresence(sw, ident, dev, n.key).catch(() => {});
+      }
     }
     return { ok: true };
   }
@@ -355,6 +414,65 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     status(sw, 'approved');
     pokeUi(sw);
     return { ok: true };
+  }
+
+  // --- chat ---
+  if (method === 'chat.open') {
+    const peerIdentityId = String(params?.peerIdentityId || '').trim();
+    if (!peerIdentityId) throw new Error('missing peerIdentityId');
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id) throw new Error('no linked identity');
+    const queueId = await chatQueueId(ident.id, peerIdentityId);
+    const messages = await chatList(queueId);
+    return { queueId, messages };
+  }
+
+  if (method === 'chat.list') {
+    const queueId = String(params?.queueId || '').trim();
+    if (!queueId) throw new Error('missing queueId');
+    return await chatList(queueId);
+  }
+
+  if (method === 'chat.send') {
+    const peerIdentityId = String(params?.peerIdentityId || '').trim();
+    const body = String(params?.body || '').trim();
+    if (!peerIdentityId) throw new Error('missing peerIdentityId');
+    if (!body) throw new Error('missing body');
+
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id) throw new Error('no linked identity');
+
+    const queueId = await chatQueueId(ident.id, peerIdentityId);
+    const ts = Date.now();
+
+    const payload = {
+      type: 'chat_message',
+      identity: ident.label || '',
+      identityId: ident.id,
+      toIdentityId: peerIdentityId,
+      queueId,
+      body,
+      ts,
+    };
+
+    const evId = await publishAppEvent(sw, payload, [
+      ['app', 'chat'],
+      ['q', queueId],
+      ['i', ident.label || ''],
+    ]);
+
+    await chatAdd(queueId, {
+      id: evId,
+      queueId,
+      fromIdentityId: ident.id,
+      toIdentityId: peerIdentityId,
+      fromLabel: ident.label || '',
+      body,
+      ts,
+    });
+
+    pokeUi(sw);
+    return { ok: true, queueId, id: evId };
   }
 
   // --- revoke + rotate (kept) ---

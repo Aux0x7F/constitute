@@ -146,6 +146,44 @@ button:disabled{opacity:0.5; cursor:not-allowed}
 .itemActions{display:flex; gap:0.4rem; align-items:center; flex-wrap:wrap}
 .danger{border-color:rgba(255,77,77,0.4); color:#ffd1d1}
 .ok{border-color:rgba(76,255,154,0.35); color:#c6ffe2}
+.chatMessages{
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:12px;
+  padding:0.6rem;
+  max-height:320px;
+  overflow:auto;
+  margin:0.5rem 0;
+  background:rgba(0,0,0,0.18);
+  display:flex;
+  flex-direction:column;
+  gap:0.4rem;
+}
+.msgRow{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:0.5rem;
+}
+.msgMeta{
+  color:var(--muted);
+  font-size:0.82rem;
+  margin-top:0.2rem;
+}
+.chatMsg{
+  padding:0.45rem 0.6rem;
+  border-radius:10px;
+  background:rgba(255,255,255,0.05);
+  border:1px solid rgba(255,255,255,0.08);
+}
+.chatMsg.me{
+  align-self:flex-end;
+  border-color:rgba(109,242,198,0.35);
+}
+.chatMeta{
+  font-size:0.75rem;
+  color:var(--muted);
+  margin-top:0.2rem;
+}
 
 .backdrop{
   position:fixed; inset:0;
