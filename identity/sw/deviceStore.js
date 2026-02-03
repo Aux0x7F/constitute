@@ -28,15 +28,6 @@ export async function getDevice() {
   return await ensureDevice();
 }
 
-export async function setDevice(dev) {
-  await kvSet('device', dev);
-}
-
-export async function getThisDeviceLabel() {
-  const dev = await ensureDevice();
-  return dev.label || '';
-}
-
 export async function setThisDeviceLabel(label) {
   const dev = await ensureDevice();
   dev.label = label;

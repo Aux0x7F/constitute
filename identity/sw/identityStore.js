@@ -18,10 +18,6 @@ export async function setProfile(p) {
   await kvSet('profile', p);
 }
 
-export async function getPendingJoinIdentityLabel() {
-  return await kvGet('pendingJoinIdentityLabel');
-}
-
 export async function setPendingJoinIdentityLabel(labelOrNull) {
   await kvSet('pendingJoinIdentityLabel', labelOrNull);
 }
