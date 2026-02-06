@@ -20,11 +20,6 @@ export async function relaySend(sw, frameArr) {
 
 export async function subscribeOnRelayOpen(sw, ident, logFn) {
   const filters = [{ kinds: [1], '#t': [APP_TAG], limit: 200 }];
-
-  if (ident?.label) {
-    filters.unshift({ kinds: [1], '#t': [APP_TAG], '#i': [ident.label], limit: 200 });
-  }
-
   await relaySend(sw, ['REQ', SUB_ID, ...filters]);
   if (logFn) logFn(`sent REQ subscribe`);
 }

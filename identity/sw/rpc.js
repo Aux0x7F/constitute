@@ -13,20 +13,32 @@ import { revokeDeviceAndRotate } from './revoke.js';
 import { handleRelayFrame } from './relayIn.js';
 import { blockedList, blockedRemove } from './blocklist.js';
 import { directoryList } from './directory.js';
-import { chatAdd, chatList } from './chatStore.js';
-import { listNeighborhoods, addNeighborhood, joinNeighborhood, publishNeighborhoodPresence } from './neighborhood.js';
+import { listZones, addZone, joinZone, publishZonePresence, publishZoneProbe, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, addSelfToZoneList, getZoneList, getZoneName, getPendingZoneKey, setPendingZoneKey, clearPendingZoneKey } from './zone.js';
+
+let presenceTimer = null;
 
 function makePairCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
 }
 
-async function chatQueueId(a, b) {
-  const s = [String(a || ''), String(b || '')].sort().join('|');
-  const h = await sha256B64Url(s);
-  return h.slice(0, 20);
-}
-
 export async function handleRpc(sw, method, params, getRelayState, setRelayState) {
+  const LIST_MAX_AGE_MS = 3 * 60 * 1000;
+  async function startPresenceLoop() {
+    if (presenceTimer) return;
+    presenceTimer = setInterval(async () => {
+      const ident = await getIdentity();
+      const dev = await ensureDevice();
+      const nbs = await listZones(ident || {});
+      for (const n of nbs) {
+        await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
+        const curr = await getZoneList(n.key);
+        const age = Date.now() - Number(curr?.ts || 0);
+        if (age > LIST_MAX_AGE_MS) {
+          await publishZoneListRequest(sw, ident, n.key).catch(() => {});
+        }
+      }
+    }, 90 * 1000);
+  }
   // --- device state ---
   if (method === 'device.getState') {
     const dev = await ensureDevice();
@@ -111,32 +123,94 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return ident || { id: '', label: '', linked: false, devices: [], roomKeyB64: '' };
   }
 
-  if (method === 'neighborhoods.list') {
-    const ident = await getIdentity();
-    return await listNeighborhoods(ident || {});
+  if (method === 'zones.pending.set') {
+    const key = String(params?.key || '').trim();
+    if (!key) throw new Error('missing key');
+    return await setPendingZoneKey(key);
   }
 
-  if (method === 'neighborhoods.add') {
+  if (method === 'zones.pending.get') {
+    return await getPendingZoneKey();
+  }
+
+  if (method === 'zones.pending.clear') {
+    await clearPendingZoneKey();
+    return { ok: true };
+  }
+
+  if (method === 'zones.list') {
+    const ident = await getIdentity();
+    return await listZones(ident || {});
+  }
+
+  if (method === 'zones.meta.request') {
+    const key = String(params?.key || '').trim();
+    if (!key) throw new Error('missing key');
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    await publishZoneMetaRequest(sw, ident, key).catch(() => {});
+    return { ok: true };
+  }
+
+  if (method === 'zones.list.request') {
+    const key = String(params?.key || '').trim();
+    if (!key) throw new Error('missing key');
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    await publishZoneListRequest(sw, ident, key).catch(() => {});
+    return { ok: true };
+  }
+
+  if (method === 'zones.add') {
     const name = String(params?.name || '').trim();
     if (!name) throw new Error('missing name');
     const ident = await getIdentity();
     if (!ident?.linked) throw new Error('no linked identity');
     const dev = await ensureDevice();
-    const res = await addNeighborhood(ident, name);
-    if (res?.key) await publishNeighborhoodPresence(sw, ident, dev, res.key).catch(() => {});
+    const res = await addZone(ident, name);
+    if (res?.key) {
+      await addSelfToZoneList(dev, res.key).catch(() => {});
+      const list = await getZoneList(res.key);
+      const zname = await getZoneName(res.key);
+      await publishZonePresence(sw, ident, dev, res.key).catch(() => {});
+      await publishZoneList(sw, ident, res.key, list.members, list.ts, zname).catch(() => {});
+      await publishZoneMeta(sw, ident, res.key, name).catch(() => {});
+      await publishAppEvent(sw, {
+        type: 'zone_joined',
+        identity: ident.label || '',
+        zone: res.key,
+        name,
+      }, [['i', ident.label || '']]);
+    }
     pokeUi(sw);
     return res;
   }
 
-  if (method === 'neighborhoods.join') {
+  if (method === 'zones.join') {
     const key = String(params?.key || '').trim();
     const name = String(params?.name || '').trim();
     if (!key) throw new Error('missing key');
     const ident = await getIdentity();
     if (!ident?.linked) throw new Error('no linked identity');
     const dev = await ensureDevice();
-    const res = await joinNeighborhood(ident, key, name);
-    if (res?.key) await publishNeighborhoodPresence(sw, ident, dev, res.key).catch(() => {});
+    const res = await joinZone(ident, key, name);
+    if (res?.key) {
+      await addSelfToZoneList(dev, res.key).catch(() => {});
+      const list = await getZoneList(res.key);
+      const zname = await getZoneName(res.key);
+      await publishZonePresence(sw, ident, dev, res.key).catch(() => {});
+      await publishZoneList(sw, ident, res.key, list.members, list.ts, zname).catch(() => {});
+      if (name) await publishZoneMeta(sw, ident, res.key, name).catch(() => {});
+      await publishZoneMetaRequest(sw, ident, res.key).catch(() => {});
+      await publishAppEvent(sw, {
+        type: 'zone_joined',
+        identity: ident.label || '',
+        zone: res.key,
+        name,
+      }, [['i', ident.label || '']]);
+      await publishZoneListRequest(sw, ident, res.key).catch(() => {});
+      await publishZoneProbe(sw, ident, res.key).catch(() => {});
+    }
     pokeUi(sw);
     return res;
   }
@@ -179,9 +253,9 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       deviceLabel,
     }, [['i', identityLabel]]);
 
-    const nbs = await listNeighborhoods(ident || {});
+    const nbs = await listZones(ident || {});
     for (const n of nbs) {
-      await publishNeighborhoodPresence(sw, ident, dev, n.key).catch(() => {});
+      await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
     }
 
     status(sw, 'identity created');
@@ -201,9 +275,9 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     await setIdentity(ident);
 
     const dev = await ensureDevice();
-    const nbs = await listNeighborhoods(ident || {});
+    const nbs = await listZones(ident || {});
     for (const n of nbs) {
-      await publishNeighborhoodPresence(sw, ident, dev, n.key).catch(() => {});
+      await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
     }
 
     await publishAppEvent(sw, {
@@ -249,6 +323,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       deviceLabel,
     }, [['i', identityLabel]]);
 
+    log(sw, `pair_request sent identity=${identityLabel} code=${code}`);
     status(sw, 'pair request sent');
     pokeUi(sw);
     return { ok: true, code };
@@ -305,10 +380,14 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       const ident = await getIdentity();
       const dev = await ensureDevice();
       await subOpen(sw, ident, (m) => log(sw, m));
-      const nbs = await listNeighborhoods(ident || {});
+      const nbs = await listZones(ident || {});
       for (const n of nbs) {
-        await publishNeighborhoodPresence(sw, ident, dev, n.key).catch(() => {});
+        await addSelfToZoneList(dev, n.key).catch(() => {});
+        await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
+        const list = await getZoneList(n.key);
+        await publishZoneList(sw, ident, n.key, list.members, list.ts, n.name || "").catch(() => {});
       }
+      await startPresenceLoop();
     }
     return { ok: true };
   }
@@ -371,6 +450,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const reqs = await pendingList();
     const r = reqs.find(x => x.id === rid);
     if (!r) throw new Error('request not found');
+    log(sw, `pairing.approve start requestId=${rid}`);
 
     // ✅ FIX: add device BEFORE sending the encrypted payload so the joiner sees itself.
     ident.devices = Array.isArray(ident.devices) ? ident.devices : [];
@@ -414,65 +494,6 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     status(sw, 'approved');
     pokeUi(sw);
     return { ok: true };
-  }
-
-  // --- chat ---
-  if (method === 'chat.open') {
-    const peerIdentityId = String(params?.peerIdentityId || '').trim();
-    if (!peerIdentityId) throw new Error('missing peerIdentityId');
-    const ident = await getIdentity();
-    if (!ident?.linked || !ident?.id) throw new Error('no linked identity');
-    const queueId = await chatQueueId(ident.id, peerIdentityId);
-    const messages = await chatList(queueId);
-    return { queueId, messages };
-  }
-
-  if (method === 'chat.list') {
-    const queueId = String(params?.queueId || '').trim();
-    if (!queueId) throw new Error('missing queueId');
-    return await chatList(queueId);
-  }
-
-  if (method === 'chat.send') {
-    const peerIdentityId = String(params?.peerIdentityId || '').trim();
-    const body = String(params?.body || '').trim();
-    if (!peerIdentityId) throw new Error('missing peerIdentityId');
-    if (!body) throw new Error('missing body');
-
-    const ident = await getIdentity();
-    if (!ident?.linked || !ident?.id) throw new Error('no linked identity');
-
-    const queueId = await chatQueueId(ident.id, peerIdentityId);
-    const ts = Date.now();
-
-    const payload = {
-      type: 'chat_message',
-      identity: ident.label || '',
-      identityId: ident.id,
-      toIdentityId: peerIdentityId,
-      queueId,
-      body,
-      ts,
-    };
-
-    const evId = await publishAppEvent(sw, payload, [
-      ['app', 'chat'],
-      ['q', queueId],
-      ['i', ident.label || ''],
-    ]);
-
-    await chatAdd(queueId, {
-      id: evId,
-      queueId,
-      fromIdentityId: ident.id,
-      toIdentityId: peerIdentityId,
-      fromLabel: ident.label || '',
-      body,
-      ts,
-    });
-
-    pokeUi(sw);
-    return { ok: true, queueId, id: evId };
   }
 
   // --- revoke + rotate (kept) ---

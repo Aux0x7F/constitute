@@ -21,8 +21,6 @@ const notifList = document.getElementById('notifList');
 const btnNotifClear = document.getElementById('btnNotifClear');
 
 const viewHome = document.getElementById('viewHome');
-const viewMessages = document.getElementById('viewMessages');
-const viewDirectory = document.getElementById('viewDirectory');
 const viewSettings = document.getElementById('viewSettings');
 const viewOnboard = document.getElementById('viewOnboard');
 
@@ -30,6 +28,7 @@ const tabButtons = Array.from(viewSettings.querySelectorAll('.tab'));
 const tabPanes = {
   profile: document.getElementById('tab_profile'),
   devices: document.getElementById('tab_devices'),
+  peers: document.getElementById('tab_peers'),
   pairing: document.getElementById('tab_pairing'),
   identity: document.getElementById('tab_identity'),
 };
@@ -51,40 +50,22 @@ const identityLabelEl = document.getElementById('identityLabel');
 const identityIdEl = document.getElementById('identityId');
 const identityLinkedEl = document.getElementById('identityLinked');
 
-const btnNewPairCode = document.getElementById('btnNewPairCode');
-const pairCodeEl = document.getElementById('pairCode');
-
-const joinIdentityLabelEl = document.getElementById('joinIdentityLabel');
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
-const btnJoin = document.getElementById('btnJoin');
-const joinStatus = document.getElementById('joinStatus');
 
 const deviceDidSummary = document.getElementById('deviceDidSummary');
 const deviceSecuritySummary = document.getElementById('deviceSecuritySummary');
 const identityLinkedSummary = document.getElementById('identityLinkedSummary');
 
-// Messages UI
-const btnNewConversation = document.getElementById('btnNewConversation');
-const msgSearch = document.getElementById('msgSearch');
-const messagesList = document.getElementById('messagesList');
-const newConversationPanel = document.getElementById('newConversationPanel');
-const directoryPickerList = document.getElementById('directoryPickerList');
-const chatLink = document.getElementById('chatLink');
-const btnCopyChatLink = document.getElementById('btnCopyChatLink');
-
-const chatPanel = document.getElementById('chatPanel');
-const chatTitle = document.getElementById('chatTitle');
-const chatMessages = document.getElementById('chatMessages');
-const chatInput = document.getElementById('chatInput');
-const chatSend = document.getElementById('chatSend');
-
-// Directory app UI
-const neighborhoodNameInput = document.getElementById('neighborhoodName');
-const btnCreateNeighborhood = document.getElementById('btnCreateNeighborhood');
-const neighborhoodsList = document.getElementById('neighborhoodsList');
-const neighborhoodLink = document.getElementById('neighborhoodLink');
-const btnCopyNeighborhoodLink = document.getElementById('btnCopyNeighborhoodLink');
-const neighborhoodMembersList = document.getElementById('neighborhoodMembersList');
+// Peers UI
+const zoneNameInput = document.getElementById('zoneName');
+const btnCreateZone = document.getElementById('btnCreateZone');
+const zonesList = document.getElementById('zonesList');
+const zoneLink = document.getElementById('zoneLink');
+const btnCopyZoneLink = document.getElementById('btnCopyZoneLink');
+const zoneJoinKey = document.getElementById('zoneJoinKey');
+const btnJoinZone = document.getElementById('btnJoinZone');
+const peersCount = document.getElementById('peersCount');
+const peersList = document.getElementById('peersList');
 
 // Onboarding elements
 const obStepDevice = document.getElementById('obStepDevice');
@@ -108,10 +89,9 @@ const connStateLog = []; // newest first
 let lastDeviceState = null;
 let lastIdentity = null;
 let lastDirectory = [];
-let activeChat = null; // { peerId, queueId, peerLabel }
-const lastChatByPeer = new Map();
-let lastNeighborhoods = [];
-let activeNeighborhoodKey = '';
+let lastZones = [];
+let activeZoneKey = '';
+let pendingZoneNav = false;
 
 function _deriveConnState() {
   const r = relayState;
@@ -211,8 +191,6 @@ document.addEventListener('click', (e) => {
 // activities
 function showActivity(name) {
   viewHome.classList.toggle('hidden', name !== 'home');
-  viewMessages.classList.toggle('hidden', name !== 'messages');
-  viewDirectory.classList.toggle('hidden', name !== 'directory');
   viewSettings.classList.toggle('hidden', name !== 'settings');
   viewOnboard.classList.toggle('hidden', name !== 'onboarding');
   panePathEl.textContent = name === 'home' ? '' : name;
@@ -223,7 +201,10 @@ function setSettingsTab(name) {
   for (const [k, el] of Object.entries(tabPanes)) el.classList.toggle('hidden', k !== name);
 }
 
-function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+function clear(el) {
+  if (!el) return;
+  while (el.firstChild) el.removeChild(el.firstChild);
+}
 
 function escapeHtml(s) {
   return String(s ?? '')
@@ -269,6 +250,10 @@ function renderNotifications(notifs) {
         setSettingsTab('pairing');
       }
       await refreshAll();
+      if (n.kind === 'pairing') {
+        showActivity('settings');
+        setSettingsTab('pairing');
+      }
     };
     notifList.appendChild(it);
   }
@@ -320,13 +305,35 @@ function renderPairRequests(reqs, identityDevices) {
     btnReject.textContent = 'Reject';
 
     btnApprove.onclick = async () => {
-      try { await client.call('pairing.approve', { requestId: r.id }, { timeoutMs: 20000 }); } catch (e) { console.error(e); }
-      await refreshAll();
+      try {
+        btnApprove.disabled = true;
+        btnApprove.textContent = 'Approving…';
+        await client.call('pairing.approve', { requestId: r.id }, { timeoutMs: 20000 });
+        await refreshAll();
+      } catch (e) {
+        console.error(e);
+        pairingEmpty.textContent = `Approve failed: ${String(e?.message || e)}`;
+        pairingEmpty.classList.remove('hidden');
+      } finally {
+        btnApprove.disabled = false;
+        btnApprove.textContent = 'Approve';
+      }
     };
 
     btnReject.onclick = async () => {
-      try { await client.call('pairing.reject', { requestId: r.id }, { timeoutMs: 20000 }); } catch (e) { console.error(e); }
-      await refreshAll();
+      try {
+        btnReject.disabled = true;
+        btnReject.textContent = 'Rejecting…';
+        await client.call('pairing.reject', { requestId: r.id }, { timeoutMs: 20000 });
+        await refreshAll();
+      } catch (e) {
+        console.error(e);
+        pairingEmpty.textContent = `Reject failed: ${String(e?.message || e)}`;
+        pairingEmpty.classList.remove('hidden');
+      } finally {
+        btnReject.disabled = false;
+        btnReject.textContent = 'Reject';
+      }
     };
 
     actions.append(btnApprove, btnReject);
@@ -423,209 +430,88 @@ function renderBlockedList(list) {
   }
 }
 
-function renderDirectory(list, targetEl, { onSelect } = {}) {
-  // TODO: Directory not populating until a message is sent; investigate presence publish/subscribe
-  // timing and ensure directory updates render immediately on receipt.
-  clear(targetEl);
+function renderZones(list) {
+  clear(zonesList);
   const arr = Array.isArray(list) ? list : [];
   if (arr.length === 0) {
     const d = document.createElement('div');
     d.className = 'item';
-    d.textContent = 'No identities discovered yet.';
-    targetEl.appendChild(d);
+    d.textContent = 'No zones yet.';
+    zonesList.appendChild(d);
     return;
   }
-  for (const e of arr) {
+  for (const z of arr) {
+    const item = document.createElement('div');
+    item.className = 'card';
+    const name = z.name || '(unnamed)';
+    const key = z.key || '';
+    const zoneMembers = (Array.isArray(lastDirectory) ? lastDirectory : []).filter(e => e.devicePk && e.zone === key);
+    item.innerHTML = `
+      <div class="cardTitle">${escapeHtml(name)}</div>
+      <div class="itemMeta">${escapeHtml(key)}</div>
+      <div class="small muted" style="margin-top:.35rem;">Peers: ${zoneMembers.length}</div>
+      <div class="list" data-zone-list="${escapeHtml(key)}"></div>
+    `;
+    const listEl = item.querySelector(`[data-zone-list="${escapeHtml(key)}"]`);
+    if (zoneMembers.length === 0) {
+      const d = document.createElement('div');
+      d.className = 'item';
+      d.textContent = 'No devices discovered yet.';
+      listEl.appendChild(d);
+    } else {
+      for (const e of zoneMembers) {
+        const row = document.createElement('div');
+        row.className = 'item';
+        row.innerHTML = `
+          <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
+          <div class="itemMeta">Last seen ${new Date(e.lastSeen || Date.now()).toLocaleString()}</div>
+        `;
+        listEl.appendChild(row);
+      }
+    }
+    item.onclick = () => {
+      activeZoneKey = key;
+      setZoneLink(key);
+      renderPeers(lastDirectory);
+    };
+    zonesList.appendChild(item);
+  }
+  if (!activeZoneKey && arr[0]?.key) {
+    activeZoneKey = arr[0].key;
+    setZoneLink(activeZoneKey);
+  }
+}
+
+function setZoneLink(key) {
+  if (!zoneLink) return;
+  if (!key) { zoneLink.textContent = ''; return; }
+  const base = `${window.location.origin}${window.location.pathname}`;
+  const url = `${base}?zone=${encodeURIComponent(key)}`;
+  zoneLink.textContent = url;
+}
+
+function renderPeers(list) {
+  if (!peersList) return;
+  clear(peersList);
+  const arr = Array.isArray(list) ? list : [];
+  const deviceEntries = arr.filter(e => e.devicePk && (!activeZoneKey || e.zone === activeZoneKey));
+  if (peersCount) peersCount.textContent = `${deviceEntries.length} devices`;
+  if (deviceEntries.length === 0) {
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.textContent = 'No devices discovered yet.';
+    peersList.appendChild(d);
+    return;
+  }
+  for (const e of deviceEntries) {
     const item = document.createElement('div');
     item.className = 'item';
-    const label = e.identityLabel || '(unknown)';
-    const id = e.identityId || '';
     item.innerHTML = `
-      <div class="itemTitle">${escapeHtml(label)}</div>
-      <div class="itemMeta">${escapeHtml(id)}</div>
+      <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
       <div class="itemMeta">Last seen ${new Date(e.lastSeen || Date.now()).toLocaleString()}</div>
     `;
-    item.onclick = () => onSelect && onSelect(id, label);
-    targetEl.appendChild(item);
+    peersList.appendChild(item);
   }
-}
-
-async function openChat(peerId, peerLabel = '') {
-  // TODO: Receiving devices not seeing new messages; ensure chat.open + renderChat refresh
-  // reacts to inbound chat_message events without requiring manual refresh.
-  if (!peerId) return;
-  const res = await client.call('chat.open', { peerIdentityId: peerId }, { timeoutMs: 20000 });
-  activeChat = { peerId, queueId: res?.queueId || '', peerLabel: peerLabel || peerId };
-  chatPanel.classList.remove('hidden');
-  chatTitle.textContent = `Chat: ${activeChat.peerLabel}`;
-  renderChat(res?.messages || []);
-}
-
-function renderChat(messages) {
-  // TODO: UX clarity: show conversation header + participants + last seen; refine empty states.
-  clear(chatMessages);
-  const arr = Array.isArray(messages) ? messages : [];
-  if (arr.length === 0) {
-    const d = document.createElement('div');
-    d.className = 'item';
-    d.textContent = 'No messages yet.';
-    chatMessages.appendChild(d);
-    return;
-  }
-  const last = arr[arr.length - 1];
-  if (activeChat?.peerId && last) {
-    lastChatByPeer.set(activeChat.peerId, last);
-  }
-  for (const m of arr) {
-    const div = document.createElement('div');
-    const isMe = m.fromIdentityId && lastIdentity?.id && m.fromIdentityId === lastIdentity.id;
-    div.className = `chatMsg${isMe ? ' me' : ''}`;
-    div.innerHTML = `
-      <div>${escapeHtml(m.body || '')}</div>
-      <div class="chatMeta">${escapeHtml(m.fromLabel || m.fromIdentityId || '')} • ${new Date(m.ts || Date.now()).toLocaleString()}</div>
-    `;
-    chatMessages.appendChild(div);
-  }
-  chatMessages.scrollTop = chatMessages.scrollHeight;
-}
-
-function renderMessagesList(list) {
-  // TODO: Messages UI is confusing; consider splitting "Directory" and "Conversations" views
-  // and only showing identities with existing chats in the conversations list.
-  clear(messagesList);
-  const arr = Array.isArray(list) ? list : [];
-  if (arr.length === 0) {
-    const d = document.createElement('div');
-    d.className = 'item';
-    d.textContent = 'No identities discovered yet.';
-    messagesList.appendChild(d);
-    return;
-  }
-  for (const e of arr) {
-    const item = document.createElement('div');
-    item.className = 'item';
-    const label = e.identityLabel || '(unknown)';
-    const id = e.identityId || '';
-    const last = lastChatByPeer.get(id);
-    item.innerHTML = `
-      <div class="msgRow">
-        <div>
-          <div class="itemTitle">${escapeHtml(label)}</div>
-          <div class="itemMeta">${escapeHtml(id)}</div>
-          <div class="msgMeta">${escapeHtml(last?.body || '')}</div>
-        </div>
-        <div class="itemActions">
-          <button type="button" title="Message">✉</button>
-        </div>
-      </div>
-    `;
-    const btn = item.querySelector('button');
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      showActivity('messages');
-      openChat(id, label);
-    };
-    item.onclick = () => {
-      showActivity('messages');
-      openChat(id, label);
-    };
-    messagesList.appendChild(item);
-  }
-}
-
-function renderNeighborhoods(list) {
-  clear(neighborhoodsList);
-  const arr = Array.isArray(list) ? list : [];
-  if (arr.length === 0) {
-    const d = document.createElement('div');
-    d.className = 'item';
-    d.textContent = 'No neighborhoods yet.';
-    neighborhoodsList.appendChild(d);
-    return;
-  }
-  for (const n of arr) {
-    const item = document.createElement('div');
-    item.className = 'item';
-    const name = n.name || '(unnamed)';
-    const key = n.key || '';
-    item.innerHTML = `
-      <div class="itemTitle">${escapeHtml(name)}</div>
-      <div class="itemMeta">${escapeHtml(key)}</div>
-    `;
-    item.onclick = () => {
-      activeNeighborhoodKey = key;
-      renderNeighborhoodMembers();
-      setNeighborhoodLink(key);
-    };
-    neighborhoodsList.appendChild(item);
-  }
-  if (!activeNeighborhoodKey && arr[0]?.key) {
-    activeNeighborhoodKey = arr[0].key;
-    renderNeighborhoodMembers();
-    setNeighborhoodLink(activeNeighborhoodKey);
-  }
-}
-
-function setNeighborhoodLink(key) {
-  if (!key) { neighborhoodLink.textContent = ''; return; }
-  const base = `${window.location.origin}${window.location.pathname}`;
-  const url = `${base}?nb=${encodeURIComponent(key)}`;
-  neighborhoodLink.textContent = url;
-}
-
-function renderNeighborhoodMembers() {
-  clear(neighborhoodMembersList);
-  const arr = Array.isArray(lastDirectory) ? lastDirectory : [];
-  const members = arr.filter(e => !activeNeighborhoodKey || e.neighborhood === activeNeighborhoodKey);
-  if (members.length === 0) {
-    const d = document.createElement('div');
-    d.className = 'item';
-    d.textContent = 'No members discovered yet.';
-    neighborhoodMembersList.appendChild(d);
-    return;
-  }
-  for (const e of members) {
-    const item = document.createElement('div');
-    item.className = 'item';
-    const label = e.identityLabel || '(unknown)';
-    const id = e.identityId || '';
-    item.innerHTML = `
-      <div class="msgRow">
-        <div>
-          <div class="itemTitle">${escapeHtml(label)}</div>
-          <div class="itemMeta">${escapeHtml(id)}</div>
-        </div>
-        <div class="itemActions">
-          <button type="button" title="Message">✉</button>
-        </div>
-      </div>
-    `;
-    const btn = item.querySelector('button');
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      showActivity('messages');
-      openChat(id, label);
-    };
-    neighborhoodMembersList.appendChild(item);
-  }
-}
-
-function primaryNeighborhoodKey() {
-  if (Array.isArray(lastNeighborhoods) && lastNeighborhoods.length > 0) {
-    return String(lastNeighborhoods[0]?.key || '');
-  }
-  return '';
-}
-
-function buildChatLink(identityId) {
-  const id = String(identityId || '').trim();
-  if (!id) return '';
-  const base = `${window.location.origin}${window.location.pathname}`;
-  const params = new URLSearchParams();
-  params.set('chat', id);
-  const nb = primaryNeighborhoodKey();
-  if (nb) params.set('nb', nb);
-  return `${base}?${params.toString()}`;
 }
 
 // onboarding: security radio choice
@@ -644,6 +530,13 @@ btnSecSkip?.addEventListener('click', () => setSecurityChoice('skip'));
 
 let client;
 
+function ensureOnboardingState(ident) {
+  if (!ident?.linked) {
+    showActivity('onboarding');
+    setOnboardStep(1);
+  }
+}
+
 async function refreshAll() {
   // SEQUENTIAL (not Promise.all) to avoid SW starvation/timeouts.
   const st = await client.call('device.getState', {}, { timeoutMs: 20000 });
@@ -652,14 +545,23 @@ async function refreshAll() {
   const reqs = await client.call('pairing.list', {}, { timeoutMs: 20000 });
   const blocked = await client.call('blocked.list', {}, { timeoutMs: 20000 });
   const directory = await client.call('directory.list', {}, { timeoutMs: 20000 });
-  const neighborhoods = await client.call('neighborhoods.list', {}, { timeoutMs: 20000 });
+  const zones = await client.call('zones.list', {}, { timeoutMs: 20000 });
   const notifs = await client.call('notifications.list', {}, { timeoutMs: 20000 });
   const myLabel = await client.call('device.getLabel', {}, { timeoutMs: 20000 });
 
   lastDeviceState = st;
   lastIdentity = ident;
   lastDirectory = directory || [];
-  lastNeighborhoods = neighborhoods || [];
+  lastZones = zones || [];
+
+  // If we only have a key, try to resolve the human name via peers.
+  for (const z of (lastZones || [])) {
+    const n = String(z?.name || '').trim();
+    if (!n || n === 'Joined' || n.startsWith('Zone ')) {
+      client.call('zones.meta.request', { key: z.key }, { timeoutMs: 20000 }).catch(() => {});
+      client.call('zones.list.request', { key: z.key }, { timeoutMs: 20000 }).catch(() => {});
+    }
+  }
 
   setDaemonState('online', 'rpc ok');
 
@@ -679,24 +581,11 @@ async function refreshAll() {
 
   renderDeviceList(ident?.devices || []);
   renderBlockedList(blocked || []);
-  renderMessagesList(lastDirectory);
-  renderDirectory(lastDirectory, directoryPickerList, { onSelect: (id, label) => {
-    newConversationPanel.classList.add('hidden');
-    openChat(id, label);
-  }});
-  renderNeighborhoods(lastNeighborhoods);
-  renderNeighborhoodMembers();
-  if (chatLink) chatLink.textContent = buildChatLink(ident?.id || '');
+  renderZones(lastZones);
+  renderPeers(lastDirectory);
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
-
-  if (activeChat?.peerId) {
-    const res = await client.call('chat.open', { peerIdentityId: activeChat.peerId }, { timeoutMs: 20000 }).catch(() => null);
-    if (res?.queueId) {
-      activeChat.queueId = res.queueId;
-      renderChat(res?.messages || []);
-    }
-  }
+  ensureOnboardingState(ident);
 
   return { st, ident };
 }
@@ -722,30 +611,71 @@ async function waitForPairAcceptance({ identityLabel, myDevicePk, timeoutMs = 90
 
 async function ensureOnboardingFlow() {
   const ident = await client.call('identity.get', {}, { timeoutMs: 20000 }).catch(() => null);
-  if (ident?.linked) {
-    showActivity('home');
-    return;
-  }
+  if (ident?.linked) return true;
   showActivity('onboarding');
   setOnboardStep(1);
+  return false;
+}
+
+async function applyPendingZone() {
+  if (!lastIdentity?.linked) return;
+  const pending = await client.call('zones.pending.get', {}, { timeoutMs: 20000 }).catch(() => '');
+  const key = normalizeZoneKey(pending);
+  if (!key) return;
+    try { await client.call('zones.join', { key }, { timeoutMs: 20000 }); } catch {}
+  try { await client.call('zones.pending.clear', {}, { timeoutMs: 20000 }); } catch {}
+  await refreshAll();
+  if (pendingZoneNav) {
+    showActivity('settings');
+    setSettingsTab('peers');
+    pendingZoneNav = false;
+    return true;
+  }
+  return false;
+}
+
+function normalizeZoneKey(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  if (!raw.includes('://')) return raw;
+  try {
+    const u = new URL(raw);
+    return u.searchParams.get('zone') || '';
+  } catch {
+    return '';
+  }
 }
 
 async function applyUrlParams() {
   const params = new URLSearchParams(window.location.search || '');
-  const nb = params.get('nb');
+  const zone = normalizeZoneKey(params.get('zone'));
   let didJoin = false;
-  if (nb) {
+  if (zone) {
     try {
-      await client.call('neighborhoods.join', { key: nb, name: 'Joined' }, { timeoutMs: 20000 });
-      didJoin = true;
+      if (!lastIdentity?.linked) {
+        await client.call('zones.pending.set', { key: zone }, { timeoutMs: 20000 });
+        pendingZoneNav = true;
+      } else {
+        await client.call('zones.join', { key: zone }, { timeoutMs: 20000 });
+        didJoin = true;
+      }
     } catch {}
   }
-  if (didJoin) await refreshAll();
-  const chat = params.get('chat');
-  if (chat && lastIdentity?.linked) {
-    showActivity('messages');
-    await openChat(chat, chat);
+  if (didJoin) {
+    await refreshAll();
+    try { await client.call('zones.pending.clear', {}, { timeoutMs: 20000 }); } catch {}
+    showActivity('settings');
+    setSettingsTab('peers');
+    return true;
   }
+  return false;
+}
+
+async function postIdentityLinkedFlow() {
+  const didUrlNav = await applyUrlParams();
+  const didPendingNav = await applyPendingZone();
+  if (didUrlNav || didPendingNav || pendingZoneNav) return;
+  showActivity('home');
 }
 
 async function runWebAuthnSetup() {
@@ -809,99 +739,32 @@ function wireUi() {
     } catch (e) { console.error(e); }
   };
 
-  btnNewPairCode.onclick = async () => {
-    try {
-      const res = await client.call('identity.newPairCode', {}, { timeoutMs: 20000 });
-      pairCodeEl.textContent = res?.code || '';
-    } catch (e) { console.error(e); }
-  };
-
-  btnJoin.onclick = async () => {
-    joinStatus.textContent = 'Requesting…';
-    const identityLabel = joinIdentityLabelEl.value.trim();
-    const dlabel = joinDeviceLabelEl.value.trim();
-    if (!identityLabel) { joinIdentityLabelEl.focus(); joinStatus.textContent = ''; return; }
-    if (!dlabel) { joinDeviceLabelEl.focus(); joinStatus.textContent = ''; return; }
-
-    try {
-      const myDevicePk = lastDeviceState?.pk || null;
-
-      const res = await client.call('identity.requestPair', { identityLabel, deviceLabel: dlabel }, { timeoutMs: 20000 });
-      joinStatus.textContent = res?.ok
-        ? `Requested. Share code ${res?.code || ''} with the owner and wait for approval…`
-        : 'Failed.';
-      if (res?.ok) {
-        const ok = await waitForPairAcceptance({ identityLabel, myDevicePk, timeoutMs: 90000 });
-        joinStatus.textContent = ok ? '' : 'Timed out. Try again.';
-        if (ok) {
-          showActivity('home');
-          await refreshAll();
-        }
-      }
-    } catch (e) {
-      console.error(e);
-      joinStatus.textContent = String(e?.message || e);
-    }
-  };
-
   btnNotifClear.onclick = async () => {
     try { await client.call('notifications.clear', {}, { timeoutMs: 20000 }); } catch {}
     await refreshAll();
   };
 
-  btnNewConversation.onclick = () => {
-    newConversationPanel.classList.toggle('hidden');
-  };
-
-  btnCopyChatLink.onclick = async () => {
-    const link = buildChatLink(lastIdentity?.id || '');
-    if (!link) return;
-    try { await navigator.clipboard.writeText(link); } catch {}
-  };
-
-  btnCreateNeighborhood.onclick = async () => {
-    const name = String(neighborhoodNameInput.value || '').trim();
+  btnCreateZone.onclick = async () => {
+    const name = String(zoneNameInput.value || '').trim();
     if (!name) return;
-    try { await client.call('neighborhoods.add', { name }, { timeoutMs: 20000 }); } catch (e) { console.error(e); }
-    neighborhoodNameInput.value = '';
+    try { await client.call('zones.add', { name }, { timeoutMs: 20000 }); } catch (e) { console.error(e); }
+    zoneNameInput.value = '';
     await refreshAll();
   };
 
-  btnCopyNeighborhoodLink.onclick = async () => {
-    const link = String(neighborhoodLink.textContent || '').trim();
+  btnCopyZoneLink.onclick = async () => {
+    const link = String(zoneLink.textContent || '').trim();
     if (!link) return;
     try { await navigator.clipboard.writeText(link); } catch {}
   };
 
-  msgSearch.addEventListener('input', () => {
-    const q = msgSearch.value.trim().toLowerCase();
-    const filtered = (lastDirectory || []).filter(e => {
-      const a = String(e.identityLabel || '').toLowerCase();
-      const b = String(e.identityId || '').toLowerCase();
-      return !q || a.includes(q) || b.includes(q);
-    });
-    renderDirectory(filtered, directoryPickerList, { onSelect: (id, label) => {
-      newConversationPanel.classList.add('hidden');
-      openChat(id, label);
-    }});
-  });
-
-  chatSend.onclick = async () => {
-    if (!activeChat?.peerId) return;
-    const body = String(chatInput.value || '').trim();
-    if (!body) return;
-    try {
-      await client.call('chat.send', { peerIdentityId: activeChat.peerId, body }, { timeoutMs: 20000 });
-      chatInput.value = '';
-      await refreshAll();
-    } catch (e) { console.error(e); }
+  btnJoinZone.onclick = async () => {
+    const key = normalizeZoneKey(zoneJoinKey.value);
+    if (!key) return;
+    try { await client.call('zones.join', { key }, { timeoutMs: 20000 }); } catch (e) { console.error(e); }
+    zoneJoinKey.value = '';
+    await refreshAll();
   };
-  chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      chatSend.click();
-    }
-  });
 
   // onboarding mode tabs
   let mode = 'new';
@@ -956,12 +819,12 @@ function wireUi() {
         existingInfo.textContent = `Current identity will be replaced after approval (${current.label || 'unknown'}).`;
       }
 
-      if (mode === 'new') {
-        await client.call('identity.create', { identityLabel: ilabel, deviceLabel: dlabel }, { timeoutMs: 20000 });
-        showActivity('home');
-        await refreshAll();
-        return;
-      }
+        if (mode === 'new') {
+          await client.call('identity.create', { identityLabel: ilabel, deviceLabel: dlabel }, { timeoutMs: 20000 });
+          await refreshAll();
+          await postIdentityLinkedFlow();
+          return;
+        }
 
       existingInfo.classList.remove('hidden');
       existingInfo.textContent = 'Requesting pairing…';
@@ -973,12 +836,12 @@ function wireUi() {
       existingInfo.textContent = `Waiting for approval… Share code ${res?.code || ''} with the owner.`;
       const ok = await waitForPairAcceptance({ identityLabel: ilabel, myDevicePk, timeoutMs: 90000 });
 
-      if (ok) {
-        existingInfo.textContent = '';
-        showActivity('home');
-        await refreshAll();
-        return;
-      }
+        if (ok) {
+          existingInfo.textContent = '';
+          await refreshAll();
+          await postIdentityLinkedFlow();
+          return;
+        }
 
       existingInfo.textContent = 'Timed out. Approve on the other device and try again.';
     } catch (e) {
@@ -1026,7 +889,21 @@ function startSharedRelayPipe(client, relayUrl) {
 (async function main() {
   client = new IdentityClient({
     onEvent: (evt) => {
-      if (evt?.type === 'log') console.log('[sw]', evt.message);
+      if (evt?.type === 'log') {
+        const msg = String(evt.message || '');
+        if (msg.startsWith('[zone_list] payload list: ')) {
+          const raw = msg.replace('[zone_list] payload list: ', '');
+          try { console.log('[sw][zone_list payload]', JSON.parse(raw)); }
+          catch { console.log('[sw][zone_list payload]', raw); }
+          return;
+        }
+        if (msg.startsWith('[zone_list] interpreted name: ')) {
+          const raw = msg.replace('[zone_list] interpreted name: ', '');
+          console.log('[sw][zone_list name]', raw);
+          return;
+        }
+        console.log('[sw]', msg);
+      }
       if (evt?.type === 'notify') refreshAll().catch(() => {});
     }
   });
@@ -1037,13 +914,15 @@ function startSharedRelayPipe(client, relayUrl) {
   wireUi();
   _pushConnLog('init');
 
-  showActivity('home');
-  setSettingsTab('profile');
-
   // Default radio selection: webauthn if supported
   setSecurityChoice('webauthn');
 
   await refreshAll();
-  await ensureOnboardingFlow();
-  await applyUrlParams();
+  const linked = await ensureOnboardingFlow();
+  if (linked) {
+    setSettingsTab('profile');
+    await postIdentityLinkedFlow();
+  } else {
+    await applyUrlParams();
+  }
 })();

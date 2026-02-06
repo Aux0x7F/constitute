@@ -4,22 +4,22 @@ Browser-native, decentralized identity and device association system with relay-
 
 ## Status
 - Prototype: active development
-- Current focus: discovery (neighborhoods), directory, and basic messaging
+- Discovery bootstrap achieved (zones + directory)
+- Next focus: swarm transport (DHT / P2P)
 
 ## Key Concepts
 - Identity: cryptographic grouping of devices
 - Device: cryptographic endpoint, optionally WebAuthn-backed
 - Pairing: device association via approval flow
-- Neighborhood: discovery scope derived from identityId + roomKey
-- Directory: local store of discovered identities
+- Zone: discovery scope joined by a shareable key
+- Directory: local store of discovered devices
 
 ## Features
 - Device identity (software + WebAuthn option)
 - Identity create/join with pairing approval flow
 - Notifications + pending request management
 - Relay transport via SharedWorker
-- Directory of discovered identities (from neighborhood presence)
-- Messages app with basic chat queues
+- Directory of discovered devices (from zone presence)
 
 ## Project Layout
 - app.js: UI + activity routing + SW RPC client
@@ -27,6 +27,9 @@ Browser-native, decentralized identity and device association system with relay-
 - relay.worker.js: WebSocket relay transport (SharedWorker)
 - identity/sw/*: Service Worker identity daemon
 - ARCHITECTURE.md: system architecture and roadmap
+
+## Architecture
+See `ARCHITECTURE.md` for the full system overview and roadmap.
 
 ## Running Locally
 1. Serve the repo at http://localhost:8000 (any static server)
@@ -36,25 +39,26 @@ Browser-native, decentralized identity and device association system with relay-
 ## Usage
 - Create an identity or join an existing one
 - Pair additional devices using the pairing flow
-- Messages app uses the Directory to start chats
-- Directory app manages neighborhoods and membership
+- Settings > Peers manages zones and discovery devices
+- If no identity is linked, the UI redirects to onboarding
 
-## Neighborhoods
-- Default neighborhood key is derived from identityId + roomKey
-- Additional neighborhoods can be created and shared via link
-- Neighborhood presence updates the Directory
+## Zones
+- Zones are discovery scopes with a human label
+- Keys are generated at creation and shared via link
+- Zone presence + member lists update the Directory
 
 ## Roadmap Snapshot
-- Fix propagation of messages + neighborhood members
-- Clean up Messages/Directory UX and flows
-- Add double-ratchet encryption
-- Add Kademlia-style DHT with relay fallback
+- Stabilize zone list propagation + naming
+- Add Kademlia-style DHT (primary transport)
+- Swarm transport and discovery
+- Shared encrypted data layers
+- Messaging maturation + double-ratchet encryption
 
 ## TODO
-- Resolve message propagation (receiver updates)
-- Resolve neighborhood member propagation timing
-- Improve UI clarity (messages vs directory)
-- Add end-to-end encryption (double ratchet)
+- Improve Peers UX clarity
+- Swarm transport and discovery
+- Shared encrypted data layers
+- Messaging maturation + double-ratchet encryption
 
 ## Security Notes
 - UI never handles secret keys

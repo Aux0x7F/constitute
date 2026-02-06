@@ -53,7 +53,7 @@ Notifications are identity-scoped state.
 
 Browser UI
 - app.js
-  - Activity routing (Home / Settings / Onboarding / Messages / Directory)
+  - Activity routing (Home / Settings / Onboarding)
   - Navigation drawer + notification bell
   - SharedWorker relay bridge
 - identity/client.js
@@ -74,12 +74,10 @@ Service Worker (Identity Daemon)
   - Signing / encryption helpers
 - identity/sw/nostr.js
   - Relay event formatting / signing
-- identity/sw/neighborhood.js
-  - Neighborhood key derivation + presence
+- identity/sw/zone.js
+  - Zone key derivation + presence
 - identity/sw/directory.js
-  - Identity directory store
-- identity/sw/chatStore.js
-  - Per-queue message store
+  - Device directory store
 
 ## Transport Layers
 
@@ -98,19 +96,13 @@ Service Worker (Identity Daemon)
 
 ## Discovery + Directory
 
-Neighborhoods are a lightweight discovery scope.
+Zones are the discovery scope. Devices join zones via a sharable link (zone key).
 
-- Neighborhood key is derived from identityId + roomKey (private-ish)
-- Neighborhood presence is published over relay
-- Directory is a local store of discovered identities
-- Directory powers Messages and future apps
+- Zone keys are generated at creation time (randomized, human label stored locally)
+- Zone presence + member lists are published over relay
+- Directory is a local store of discovered devices
+- Directory powers Peers (discovery) and future apps
 
-## Messages (Basic)
-
-- Deterministic queueId derived from identityId pairs
-- chat_message events published to relay
-- chatStore persists messages locally
-- Messages UI is an app-level activity (not Settings)
 
 ## State Storage
 
@@ -124,8 +116,7 @@ Stores:
 - Notifications
 - Blocked devices
 - Directory entries
-- Chat messages
-- Neighborhood list
+- Zone list
 
 ### Relay / Room State
 Ephemeral + syncable channel.
@@ -135,8 +126,7 @@ Used for:
 - Pair approval events
 - Notifications clear sync (optional)
 - Device/identity label updates
-- Neighborhood presence
-- Chat messages
+- Zone presence
 
 ## Security Model
 
@@ -168,16 +158,15 @@ Used for:
 ## Roadmap
 
 ### Near Term
-- Fix message + neighborhood member propagation
-- Clean up Messages / Directory UX
-- Add double-ratchet encryption
-- Add peer discovery DHT (Kademlia-style) with relay fallback
+- Stabilize zone list propagation + naming
+- Clean up Peers UX
 
 ### Mid Term
-- Swarm/DHT bootstrap integration
+- Swarm/DHT bootstrap integration (primary transport)
 - Peer-to-peer synchronization
 - Replace relay dependency for most state
 - Shared encrypted data layers
+- Messaging maturation + double-ratchet encryption
 
 ### Long Term
 - Full decentralized app substrate

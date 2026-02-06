@@ -14,16 +14,20 @@ export async function directoryList() {
 export async function directoryUpsert(entry) {
   const list = (await kvGet(KEY)) || [];
   const arr = Array.isArray(list) ? list : [];
-  const id = String(entry?.identityId || '').trim();
-  if (!id) return { ok: false };
+  const identityId = String(entry?.identityId || '').trim();
+  const devicePk = String(entry?.devicePk || '').trim();
+  if (!identityId && !devicePk) return { ok: false };
 
-  const next = arr.filter(e => e?.identityId !== id);
+  const key = identityId ? `id:${identityId}` : `dev:${devicePk}`;
+  const next = arr.filter(e => e?.key !== key);
   next.unshift({
-    identityId: id,
+    key,
+    identityId,
     identityLabel: String(entry?.identityLabel || ''),
-    neighborhood: String(entry?.neighborhood || ''),
+    zone: String(entry?.zone || ''),
     lastSeen: Number(entry?.lastSeen || Date.now()),
-    devicePk: String(entry?.devicePk || ''),
+    devicePk,
+    swarm: String(entry?.swarm || ''),
   });
 
   while (next.length > CAP) next.pop();

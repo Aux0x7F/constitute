@@ -61,8 +61,6 @@
 
   <nav class="drawerNav">
     <button class="navbtn" data-activity="home">Home</button>
-    <button class="navbtn" data-activity="messages">Messages</button>
-    <button class="navbtn" data-activity="directory">Directory</button>
     <button class="navbtn" data-activity="settings">Settings</button>
     <button class="navbtn" data-activity="onboarding">Onboarding</button>
   </nav>
@@ -92,60 +90,11 @@
     </div>
   </section>
 
-  <section id="viewMessages" class="activity hidden">
-    <h1>Messages</h1>
-    <div class="row">
-      <button id="btnNewConversation" type="button">New conversation</button>
-      <input id="msgSearch" type="text" placeholder="Search directory" />
-    </div>
-    <div class="row">
-      <div id="chatLink" class="mono"></div>
-      <button id="btnCopyChatLink" type="button">Copy my chat link</button>
-    </div>
-    <div id="messagesList" class="list"></div>
-
-    <div id="newConversationPanel" class="card hidden">
-      <div class="cardTitle">Start a conversation</div>
-      <div id="directoryPickerList" class="list"></div>
-    </div>
-
-    <div id="chatPanel" class="card hidden">
-      <div id="chatTitle" class="cardTitle">Chat</div>
-      <div id="chatMessages" class="chatMessages"></div>
-      <div class="row">
-        <input id="chatInput" type="text" placeholder="Type a message…" />
-        <button id="chatSend" type="button">Send</button>
-      </div>
-    </div>
-  </section>
-
-  <section id="viewDirectory" class="activity hidden">
-    <h1>Directory</h1>
-
-    <div class="card">
-      <div class="cardTitle">Neighborhoods</div>
-      <div class="row">
-        <input id="neighborhoodName" type="text" placeholder="Neighborhood name" />
-        <button id="btnCreateNeighborhood" type="button">Create</button>
-      </div>
-      <div class="small muted">Share the link below to invite others.</div>
-      <div class="row">
-        <div id="neighborhoodLink" class="mono"></div>
-        <button id="btnCopyNeighborhoodLink" type="button">Copy link</button>
-      </div>
-      <div id="neighborhoodsList" class="list"></div>
-    </div>
-
-    <div class="card">
-      <div class="cardTitle">Members</div>
-      <div id="neighborhoodMembersList" class="list"></div>
-    </div>
-  </section>
-
   <section id="viewSettings" class="activity hidden">
     <div class="tabs">
       <button class="tab" data-tab="profile">Profile</button>
       <button class="tab" data-tab="devices">Devices</button>
+      <button class="tab" data-tab="peers">Peers</button>
       <button class="tab" data-tab="pairing">Pairing</button>
       <button class="tab" data-tab="identity">Identity</button>
     </div>
@@ -186,6 +135,32 @@
       <div id="blockedList" class="list"></div>
     </div>
 
+    <div id="tab_peers" class="tabpane hidden">
+      <h2>Peers</h2>
+      <div class="card">
+        <div class="cardTitle">Create Zone</div>
+        <div class="row">
+          <input id="zoneName" type="text" placeholder="Zone name (required)" />
+          <button id="btnCreateZone" type="button">Create</button>
+        </div>
+        <div class="small muted">Share the link below to invite others.</div>
+        <div class="row">
+          <div id="zoneLink" class="mono"></div>
+          <button id="btnCopyZoneLink" type="button">Copy link</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">Join Zone</div>
+        <div class="row">
+          <input id="zoneJoinKey" type="text" placeholder="Paste zone key" />
+          <button id="btnJoinZone" type="button">Join</button>
+        </div>
+      </div>
+
+      <div id="zonesList" class="list"></div>
+    </div>
+
 
     <div id="tab_pairing" class="tabpane hidden">
       <h2>Pairing</h2>
@@ -211,27 +186,6 @@
       <div class="kv">
         <div class="k">Linked</div>
         <div class="v" id="identityLinked"></div>
-      </div>
-
-      <div class="card">
-        <div class="cardTitle">Pairing code</div>
-        <div class="row">
-          <button id="btnNewPairCode" type="button">Generate Code</button>
-          <div id="pairCode" class="mono"></div>
-        </div>
-        <div class="small muted">Share this code with another device to request pairing.</div>
-      </div>
-
-      <div class="card">
-        <div class="cardTitle">Join an identity</div>
-        <label for="joinIdentityLabel">Identity label</label>
-        <input id="joinIdentityLabel" type="text" placeholder="identity label (exact)" />
-        <label for="joinDeviceLabel">Device label</label>
-        <input id="joinDeviceLabel" type="text" placeholder="device label" />
-        <div class="row">
-          <button id="btnJoin" type="button">Request Pairing</button>
-        </div>
-        <div id="joinStatus" class="small muted"></div>
       </div>
     </div>
   </section>
@@ -267,10 +221,10 @@
       <div class="small muted">Both are required.</div>
 
       <label for="obDeviceLabel">Device label</label>
-      <input id="obDeviceLabel" type="text" placeholder="e.g. kyle-laptop" />
+      <input id="obDeviceLabel" type="text" placeholder="e.g. users-laptop" />
 
       <label for="obIdentityLabel">Identity label</label>
-      <input id="obIdentityLabel" type="text" placeholder="e.g. greywatch" />
+      <input id="obIdentityLabel" type="text" placeholder="e.g. some-unique-username" />
 
       <div class="tabs" style="margin-top:.5rem;">
         <button type="button" class="tab tab-active" data-mode="new">Create</button>

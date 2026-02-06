@@ -10,8 +10,7 @@ import { log, pokeUi } from './uiBus.js';
 import { blockedAdd, blockedIs, blockedRemove } from './blocklist.js';
 import { kvGet, kvSet } from './idb.js';
 import { directoryUpsert } from './directory.js';
-import { chatAdd } from './chatStore.js';
-import { isNeighborhoodJoined } from './neighborhood.js';
+import { isZoneJoined, joinZone, addSelfToZoneList, publishZonePresence, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, publishZoneProbe, setZoneList, getZoneList, updateZoneName, listZones } from './zone.js';
 
 const REPLAY_WINDOW_SEC = 10 * 60;
 const REPLAY_SKEW_SEC = 2 * 60;
@@ -85,15 +84,18 @@ export async function handleRelayFrame(sw, raw) {
   const dev = await getDevice();
   const ident = await getIdentity();
 
-  // optional identity scoping
   const identityTag = tags.find(t => Array.isArray(t) && t[0] === 'i');
   const scopedLabel = identityTag?.[1] || null;
-  if (ident?.label && scopedLabel && scopedLabel !== ident.label) return;
 
   const replayIdentity = String(payload.identity || scopedLabel || '').trim();
   if (replayIdentity) {
     const ok = await replayAccept(replayIdentity, ev);
     if (!ok) return;
+  }
+
+  // optional identity scoping for identity-bound events
+  if (ident?.label && scopedLabel && scopedLabel !== ident.label) {
+    if (payload.type !== 'pair_request') return;
   }
 
   // --- Device blocked / unblocked (blacklist convergence) ---
@@ -122,22 +124,133 @@ export async function handleRelayFrame(sw, raw) {
     return;
   }
 
-  // --- Neighborhood presence (directory) ---
-  if (payload.type === 'neighborhood_presence') {
+  // --- Zone presence (directory) ---
+  if (payload.type === 'zone_presence') {
     if (!ident?.linked || !ident?.id) return;
-    const nb = String(payload.neighborhood || '').trim();
-    if (!nb) return;
-    const ok = await isNeighborhoodJoined(ident, nb);
+    const z = String(payload.zone || '').trim();
+    if (!z) return;
+    const ok = await isZoneJoined(ident, z);
     if (!ok) return;
-    if (payload.identityId && payload.identityId === ident.id) return;
+    if (payload.devicePk && payload.devicePk === dev?.nostr?.pk) return;
     await directoryUpsert({
-      identityId: String(payload.identityId || '').trim(),
-      identityLabel: String(payload.identityLabel || '').trim(),
-      neighborhood: nb,
+      zone: z,
       lastSeen: Date.now(),
       devicePk: String(payload.devicePk || '').trim(),
+      swarm: String(payload.swarm || ''),
     });
     pokeUi(sw);
+    return;
+  }
+
+  // --- Zone list ---
+  if (payload.type === 'zone_list') {
+    if (!ident?.linked || !ident?.id) return;
+    const z = String(payload.zone || '').trim();
+    if (!z) return;
+    const ok = await isZoneJoined(ident, z);
+    if (!ok) return;
+    const ts = Number(payload.ts || 0);
+    const curr = await getZoneList(z);
+    if (ts && curr?.ts && ts <= curr.ts) return;
+      const members = Array.isArray(payload.members) ? payload.members : [];
+      const selfPk = String(dev?.nostr?.pk || '').trim();
+      if (selfPk && !members.some(m => m?.devicePk === selfPk)) {
+        members.unshift({ devicePk: selfPk, swarm: '' });
+      }
+      const zname = String(payload.name || '').trim();
+      const isPlaceholder = !zname || zname === 'Joined' || zname.startsWith('Zone ');
+      log(sw, `[zone_list] payload list: ${JSON.stringify(payload)}`);
+      log(sw, `[zone_list] interpreted name: ${zname || '(empty)'}`);
+      if (!isPlaceholder) await updateZoneName(z, zname).catch(() => {});
+    await setZoneList(z, members, ts || Date.now());
+    for (const m of members) {
+      if (!m?.devicePk) continue;
+      if (m.devicePk === dev?.nostr?.pk) continue;
+      await directoryUpsert({
+        zone: z,
+        lastSeen: Date.now(),
+        devicePk: String(m.devicePk || '').trim(),
+        swarm: String(m.swarm || ''),
+      });
+    }
+    pokeUi(sw);
+    return;
+  }
+
+  // --- Zone list request ---
+  if (payload.type === 'zone_list_request') {
+    if (!ident?.linked || !ident?.id) return;
+    const z = String(payload.zone || '').trim();
+    if (!z) return;
+    const ok = await isZoneJoined(ident, z);
+    if (!ok) return;
+    const dev = await getDevice();
+    await addSelfToZoneList(dev, z).catch(() => {});
+    const curr = await getZoneList(z);
+    await publishZonePresence(sw, ident, dev, z).catch(() => {});
+    const zones = await listZones(ident || {});
+    const hit = zones.find(x => x.key === z);
+    const zname = hit?.name || '';
+    const isPlaceholder = !zname || zname === 'Joined' || zname.startsWith('Zone ');
+    const nameForList = isPlaceholder ? '' : zname;
+    await publishZoneList(sw, ident, z, curr.members || [], curr.ts || Date.now(), nameForList).catch(() => {});
+    if (nameForList) await publishZoneMeta(sw, ident, z, nameForList).catch(() => {});
+    return;
+  }
+
+  // --- Zone meta ---
+  if (payload.type === 'zone_meta') {
+    const z = String(payload.zone || '').trim();
+    const n = String(payload.name || '').trim();
+    if (!z || !n) return;
+    const ok = await isZoneJoined(ident, z);
+    if (!ok) return;
+    await updateZoneName(z, n).catch(() => {});
+    pokeUi(sw);
+    return;
+  }
+
+  if (payload.type === 'zone_meta_request') {
+    const z = String(payload.zone || '').trim();
+    if (!z) return;
+    const ok = await isZoneJoined(ident, z);
+    if (!ok) return;
+    const zones = await listZones(ident || {});
+    const hit = zones.find(x => x.key === z);
+    if (hit?.name) await publishZoneMeta(sw, ident, z, hit.name).catch(() => {});
+    return;
+  }
+
+  // --- Zone joined (identity-wide sync) ---
+  if (payload.type === 'zone_joined') {
+    if (!ident?.linked || !ident?.label) return;
+    if (payload.identity !== ident.label) return;
+    const z = String(payload.zone || '').trim();
+    if (!z) return;
+    const already = await isZoneJoined(ident, z);
+    if (!already) {
+      await joinZone(ident, z, String(payload.name || 'Zone')).catch(() => {});
+    }
+    const dev = await getDevice();
+    await addSelfToZoneList(dev, z).catch(() => {});
+    const list = await getZoneList(z);
+    await publishZonePresence(sw, ident, dev, z).catch(() => {});
+    await publishZoneList(sw, ident, z, list.members || [], list.ts || Date.now()).catch(() => {});
+    await publishZoneListRequest(sw, ident, z).catch(() => {});
+    await publishZoneProbe(sw, ident, z).catch(() => {});
+    pokeUi(sw);
+    return;
+  }
+
+  // --- Zone probe (request presence) ---
+  if (payload.type === 'zone_probe') {
+    if (!ident?.linked || !ident?.id) return;
+    const z = String(payload.zone || '').trim();
+    if (!z) return;
+    const ok = await isZoneJoined(ident, z);
+    if (!ok) return;
+    const dev = await getDevice();
+    await publishZonePresence(sw, ident, dev, z).catch(() => {});
     return;
   }
 
@@ -172,34 +285,13 @@ export async function handleRelayFrame(sw, raw) {
     return;
   }
 
-  // --- Chat message ---
-  if (payload.type === 'chat_message') {
-    // TODO: Messages not propagating to receiving devices reliably; verify relay subscription,
-    // queue id routing, and directory population timing when messages arrive.
-    if (!ident?.linked || !ident?.id) return;
-    const toId = String(payload.toIdentityId || '').trim();
-    const fromId = String(payload.identityId || '').trim();
-    if (!toId || !fromId) return;
-    if (toId !== ident.id && fromId !== ident.id) return;
-    const qid = String(payload.queueId || '').trim();
-    if (!qid) return;
-    await chatAdd(qid, {
-      id: String(ev.id || ''),
-      queueId: qid,
-      fromIdentityId: fromId,
-      toIdentityId: toId,
-      fromLabel: String(payload.identity || '').trim(),
-      body: String(payload.body || ''),
-      ts: Number(payload.ts || Date.now()),
-    });
-    pokeUi(sw);
-    return;
-  }
-
   // --- Pair request ---
   if (payload.type === 'pair_request') {
     if (!ident?.linked || !ident?.label) return;
-    if (payload.identity !== ident.label) return;
+    if (payload.identity !== ident.label) {
+      log(sw, `pair_request ignored: label mismatch payload=${payload.identity} ident=${ident.label}`);
+      return;
+    }
 
     // Ignore requests from blocked devices.
     if (await blockedIs({ pk: payload.devicePk, did: payload.deviceDid })) return;
