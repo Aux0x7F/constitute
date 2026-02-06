@@ -1,7 +1,7 @@
 // FILE: identity/sw/rpc.js
 
 import { kvSet } from './idb.js';
-import { randomBytes, b64url } from './crypto.js';
+import { randomBytes, b64url, sha256B64Url } from './crypto.js';
 import { ensureDevice, setThisDeviceLabel } from './deviceStore.js';
 import { getIdentity, setIdentity, getProfile, setProfile, setPendingJoinIdentityLabel } from './identityStore.js';
 import { notifList, notifMarkRead, notifRemove, notifClear } from './notifs.js';
@@ -12,12 +12,33 @@ import { nip04Encrypt } from './nostr.js';
 import { revokeDeviceAndRotate } from './revoke.js';
 import { handleRelayFrame } from './relayIn.js';
 import { blockedList, blockedRemove } from './blocklist.js';
+import { directoryList } from './directory.js';
+import { listZones, addZone, joinZone, publishZonePresence, publishZoneProbe, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, addSelfToZoneList, getZoneList, getZoneName, getPendingZoneKey, setPendingZoneKey, clearPendingZoneKey } from './zone.js';
+
+let presenceTimer = null;
 
 function makePairCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
 }
 
 export async function handleRpc(sw, method, params, getRelayState, setRelayState) {
+  const LIST_MAX_AGE_MS = 3 * 60 * 1000;
+  async function startPresenceLoop() {
+    if (presenceTimer) return;
+    presenceTimer = setInterval(async () => {
+      const ident = await getIdentity();
+      const dev = await ensureDevice();
+      const nbs = await listZones(ident || {});
+      for (const n of nbs) {
+        await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
+        const curr = await getZoneList(n.key);
+        const age = Date.now() - Number(curr?.ts || 0);
+        if (age > LIST_MAX_AGE_MS) {
+          await publishZoneListRequest(sw, ident, n.key).catch(() => {});
+        }
+      }
+    }, 90 * 1000);
+  }
   // --- device state ---
   if (method === 'device.getState') {
     const dev = await ensureDevice();
@@ -102,6 +123,102 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return ident || { id: '', label: '', linked: false, devices: [], roomKeyB64: '' };
   }
 
+  if (method === 'zones.pending.set') {
+    const key = String(params?.key || '').trim();
+    if (!key) throw new Error('missing key');
+    return await setPendingZoneKey(key);
+  }
+
+  if (method === 'zones.pending.get') {
+    return await getPendingZoneKey();
+  }
+
+  if (method === 'zones.pending.clear') {
+    await clearPendingZoneKey();
+    return { ok: true };
+  }
+
+  if (method === 'zones.list') {
+    const ident = await getIdentity();
+    return await listZones(ident || {});
+  }
+
+  if (method === 'zones.meta.request') {
+    const key = String(params?.key || '').trim();
+    if (!key) throw new Error('missing key');
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    await publishZoneMetaRequest(sw, ident, key).catch(() => {});
+    return { ok: true };
+  }
+
+  if (method === 'zones.list.request') {
+    const key = String(params?.key || '').trim();
+    if (!key) throw new Error('missing key');
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    await publishZoneListRequest(sw, ident, key).catch(() => {});
+    return { ok: true };
+  }
+
+  if (method === 'zones.add') {
+    const name = String(params?.name || '').trim();
+    if (!name) throw new Error('missing name');
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    const dev = await ensureDevice();
+    const res = await addZone(ident, name);
+    if (res?.key) {
+      await addSelfToZoneList(dev, res.key).catch(() => {});
+      const list = await getZoneList(res.key);
+      const zname = await getZoneName(res.key);
+      await publishZonePresence(sw, ident, dev, res.key).catch(() => {});
+      await publishZoneList(sw, ident, res.key, list.members, list.ts, zname).catch(() => {});
+      await publishZoneMeta(sw, ident, res.key, name).catch(() => {});
+      await publishAppEvent(sw, {
+        type: 'zone_joined',
+        identity: ident.label || '',
+        zone: res.key,
+        name,
+      }, [['i', ident.label || '']]);
+    }
+    pokeUi(sw);
+    return res;
+  }
+
+  if (method === 'zones.join') {
+    const key = String(params?.key || '').trim();
+    const name = String(params?.name || '').trim();
+    if (!key) throw new Error('missing key');
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    const dev = await ensureDevice();
+    const res = await joinZone(ident, key, name);
+    if (res?.key) {
+      await addSelfToZoneList(dev, res.key).catch(() => {});
+      const list = await getZoneList(res.key);
+      const zname = await getZoneName(res.key);
+      await publishZonePresence(sw, ident, dev, res.key).catch(() => {});
+      await publishZoneList(sw, ident, res.key, list.members, list.ts, zname).catch(() => {});
+      if (name) await publishZoneMeta(sw, ident, res.key, name).catch(() => {});
+      await publishZoneMetaRequest(sw, ident, res.key).catch(() => {});
+      await publishAppEvent(sw, {
+        type: 'zone_joined',
+        identity: ident.label || '',
+        zone: res.key,
+        name,
+      }, [['i', ident.label || '']]);
+      await publishZoneListRequest(sw, ident, res.key).catch(() => {});
+      await publishZoneProbe(sw, ident, res.key).catch(() => {});
+    }
+    pokeUi(sw);
+    return res;
+  }
+
+  if (method === 'directory.list') {
+    return await directoryList();
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();
@@ -136,6 +253,11 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       deviceLabel,
     }, [['i', identityLabel]]);
 
+    const nbs = await listZones(ident || {});
+    for (const n of nbs) {
+      await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
+    }
+
     status(sw, 'identity created');
     pokeUi(sw);
     return { ok: true };
@@ -151,6 +273,12 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const prev = ident.label || '';
     ident.label = identityLabel;
     await setIdentity(ident);
+
+    const dev = await ensureDevice();
+    const nbs = await listZones(ident || {});
+    for (const n of nbs) {
+      await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
+    }
 
     await publishAppEvent(sw, {
       type: 'identity_label_update',
@@ -195,6 +323,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       deviceLabel,
     }, [['i', identityLabel]]);
 
+    log(sw, `pair_request sent identity=${identityLabel} code=${code}`);
     status(sw, 'pair request sent');
     pokeUi(sw);
     return { ok: true, code };
@@ -249,7 +378,16 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     }
     if (state === 'open') {
       const ident = await getIdentity();
+      const dev = await ensureDevice();
       await subOpen(sw, ident, (m) => log(sw, m));
+      const nbs = await listZones(ident || {});
+      for (const n of nbs) {
+        await addSelfToZoneList(dev, n.key).catch(() => {});
+        await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
+        const list = await getZoneList(n.key);
+        await publishZoneList(sw, ident, n.key, list.members, list.ts, n.name || "").catch(() => {});
+      }
+      await startPresenceLoop();
     }
     return { ok: true };
   }
@@ -312,6 +450,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const reqs = await pendingList();
     const r = reqs.find(x => x.id === rid);
     if (!r) throw new Error('request not found');
+    log(sw, `pairing.approve start requestId=${rid}`);
 
     // ✅ FIX: add device BEFORE sending the encrypted payload so the joiner sees itself.
     ident.devices = Array.isArray(ident.devices) ? ident.devices : [];
