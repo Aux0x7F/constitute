@@ -9,6 +9,8 @@ const connLog = document.getElementById('connLog');
 const connPopover = document.getElementById('connPopover');
 const popRelay = document.getElementById('popRelay');
 const popDaemon = document.getElementById('popDaemon');
+const popSwarm = document.getElementById('popSwarm');
+const popSwarmCache = document.getElementById('popSwarmCache');
 
 const btnMenu = document.getElementById('btnMenu');
 const drawer = document.getElementById('drawer');
@@ -81,8 +83,15 @@ const btnSecWebAuthn = document.getElementById('btnSecWebAuthn');
 const btnSecSkip = document.getElementById('btnSecSkip');
 const obDeviceStatus = document.getElementById('obDeviceStatus');
 
+const SWARM_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  // TODO: Add TURN here for NATs that block P2P.
+  // { urls: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' },
+];
+
 let relayState = 'offline';
 let daemonState = 'unknown';
+let swarmState = 'offline';
 let connDerived = 'offline';
 const connStateLog = []; // newest first
 
@@ -92,29 +101,373 @@ let lastDirectory = [];
 let lastZones = [];
 let activeZoneKey = '';
 let pendingZoneNav = false;
+let swarm = null;
+let clientReady = false;
+let swarmBootRequested = false;
+
+class SwarmTransport {
+  constructor({ client, onState }) {
+    this.client = client;
+    this.onState = onState || (() => {});
+    this.localPk = '';
+    this.peers = new Map(); // pk -> RTCPeerConnection
+    this.channels = new Map(); // pk -> RTCDataChannel
+    this.connecting = new Set();
+    this.backoff = new Map(); // pk -> nextAt
+    this.maxPeers = 6;
+    this.lastKnown = [];
+    this.lastPeerKey = '';
+    this.success = new Map(); // pk -> lastOkMs
+    this.identityCache = [];
+    this.deviceCache = [];
+    this.identityCacheTs = 0;
+    this.deviceCacheTs = 0;
+    this.swarmSeen = new Map(); // pk -> lastSeenMs
+    this.cacheTtlMs = 24 * 60 * 60 * 1000;
+  }
+
+  setLocalPk(pk) {
+    this.localPk = String(pk || '').trim();
+  }
+
+  async setPeers(list) {
+    if (typeof RTCPeerConnection === 'undefined') {
+      this.onState('error');
+      return;
+    }
+    const peers = this._selectPeers(list);
+    const key = peers.slice().sort().join(',');
+    if (key === this.lastPeerKey) {
+      this._updateState();
+      return;
+    }
+    this.lastPeerKey = key;
+    console.log('[swarm] peers selected', peers);
+    this.lastKnown = peers;
+    this._persistLastKnown(peers);
+    for (const pk of peers) {
+      if (!this.peers.has(pk) && !this.connecting.has(pk) && this._canDial(pk)) {
+        this.connecting.add(pk);
+        console.log('[swarm] dialing', pk);
+        this._connectTo(pk).catch(() => {});
+      }
+    }
+    this._updateState();
+  }
+
+  _updateState() {
+    const openCount = Array.from(this.channels.values()).filter(c => c && c.readyState === 'open').length;
+    if (openCount > 0) this.onState('open');
+    else if (this.connecting.size > 0) this.onState('connecting');
+    else this.onState('offline');
+  }
+
+  async _connectTo(pk) {
+    const pc = new RTCPeerConnection({ iceServers: SWARM_ICE_SERVERS });
+    this.peers.set(pk, pc);
+
+    pc.onicecandidate = (e) => {
+      if (!e.candidate) return;
+      console.log('[swarm] ice', pk);
+      this._sendSignal(pk, 'ice', e.candidate).catch(() => {});
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
+        this._cleanup(pk);
+      }
+      this._updateState();
+    };
+
+    const dc = pc.createDataChannel('swarm');
+    this._attachChannel(pk, dc);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    console.log('[swarm] offer', pk);
+    await this._sendSignal(pk, 'offer', offer);
+  }
+
+  async _acceptFrom(pk, offer) {
+    let pc = this.peers.get(pk);
+    if (!pc) {
+      pc = new RTCPeerConnection({ iceServers: SWARM_ICE_SERVERS });
+      this.peers.set(pk, pc);
+      pc.onicecandidate = (e) => {
+        if (!e.candidate) return;
+        this._sendSignal(pk, 'ice', e.candidate).catch(() => {});
+      };
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
+          this._cleanup(pk);
+        }
+        this._updateState();
+      };
+      pc.ondatachannel = (e) => this._attachChannel(pk, e.channel);
+    }
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    console.log('[swarm] answer', pk);
+    await this._sendSignal(pk, 'answer', answer);
+  }
+
+  async _handleAnswer(pk, answer) {
+    const pc = this.peers.get(pk);
+    if (!pc) return;
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  }
+
+  async _handleIce(pk, cand) {
+    const pc = this.peers.get(pk);
+    if (!pc) return;
+    try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch {}
+  }
+
+  _attachChannel(pk, dc) {
+    this.channels.set(pk, dc);
+    dc.onopen = async () => {
+      this.connecting.delete(pk);
+      this.backoff.delete(pk);
+      this._recordSuccess(pk);
+      this._markSeen(pk);
+      console.log('[swarm] channel open', pk);
+      await this._sendRecords(dc);
+      this._updateState();
+    };
+    dc.onclose = () => {
+      this._cleanup(pk);
+      this._updateState();
+    };
+    dc.onmessage = (e) => this._onChannelMessage(pk, e.data);
+  }
+
+  async _sendRecords(dc) {
+    const irec = await this.client.call('swarm.identity.record', {}, { timeoutMs: 20000 }).catch(() => null);
+    const drec = await this.client.call('swarm.device.record', {}, { timeoutMs: 20000 }).catch(() => null);
+    dc.send(JSON.stringify({ type: 'swarm_records', identityRecord: irec, deviceRecord: drec }));
+  }
+
+  async _onChannelMessage(pk, data) {
+    let msg;
+    try { msg = JSON.parse(String(data || '')); } catch { return; }
+    this._markSeen(pk);
+    console.log('[swarm] msg', pk, msg?.type || 'unknown');
+    if (msg.type === 'swarm_records') {
+      if (msg.identityRecord) await this.client.call('swarm.identity.put', { record: msg.identityRecord }, { timeoutMs: 20000 }).catch(() => {});
+      if (msg.deviceRecord) await this.client.call('swarm.device.put', { record: msg.deviceRecord }, { timeoutMs: 20000 }).catch(() => {});
+      return;
+    }
+    if (msg.type === 'swarm_request') {
+      await this._sendRecords(this.channels.get(pk));
+      return;
+    }
+  }
+
+  async _sendSignal(toPk, signalType, data) {
+    return await this.client.call('swarm.signal.send', { toPk, signalType, data }, { timeoutMs: 20000 });
+  }
+
+  async onSignal(evt) {
+    const from = String(evt?.from || '').trim();
+    if (!from || from === this.localPk) return;
+    const t = evt?.signalType;
+    console.log('[swarm] signal', t, from);
+    if (t === 'offer') return await this._acceptFrom(from, evt.data);
+    if (t === 'answer') return await this._handleAnswer(from, evt.data);
+    if (t === 'ice') return await this._handleIce(from, evt.data);
+  }
+
+  _cleanup(pk) {
+    this.connecting.delete(pk);
+    this._backoff(pk);
+    const ch = this.channels.get(pk);
+    if (ch) try { ch.close(); } catch {}
+    this.channels.delete(pk);
+    const pc = this.peers.get(pk);
+    if (pc) try { pc.close(); } catch {}
+    this.peers.delete(pk);
+  }
+
+  _selectPeers(list) {
+    const arr = (Array.isArray(list) ? list : [])
+      .map(r => String(r?.devicePk || '').trim())
+      .filter(Boolean)
+      .filter(pk => pk !== this.localPk);
+    if (arr.length <= this.maxPeers) return arr;
+    const scored = arr.map(pk => ({
+      pk,
+      score: this.success.get(pk) || 0,
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, Math.min(this.maxPeers, Math.max(2, Math.floor(this.maxPeers / 2)))).map(x => x.pk);
+    const rest = scored.slice(top.length).map(x => x.pk);
+    const shuffled = rest.sort(() => Math.random() - 0.5);
+    const pick = top.concat(shuffled.slice(0, this.maxPeers - top.length));
+    return pick;
+  }
+
+  _backoff(pk) {
+    const now = Date.now();
+    const next = now + 30_000 + Math.floor(Math.random() * 20_000);
+    this.backoff.set(pk, next);
+  }
+
+  _canDial(pk) {
+    const nextAt = this.backoff.get(pk) || 0;
+    return Date.now() >= nextAt;
+  }
+
+  _persistLastKnown(peers) {
+    try { localStorage.setItem('swarm.lastPeers', JSON.stringify(peers)); } catch {}
+  }
+
+  _recordSuccess(pk) {
+    this.success.set(pk, Date.now());
+    this._persistSuccess();
+  }
+
+  _persistSuccess() {
+    try {
+      const arr = Array.from(this.success.entries());
+      localStorage.setItem('swarm.peerSuccess', JSON.stringify(arr));
+    } catch {}
+  }
+
+  loadSuccess() {
+    try {
+      const raw = localStorage.getItem('swarm.peerSuccess');
+      const arr = JSON.parse(raw || '[]');
+      if (Array.isArray(arr)) {
+        this.success = new Map(arr.filter(x => Array.isArray(x) && x.length === 2));
+      }
+    } catch {}
+  }
+
+  cacheIdentityRecords(list) {
+    const arr = Array.isArray(list) ? list : [];
+    this.identityCache = arr;
+    this.identityCacheTs = Date.now();
+    try {
+      localStorage.setItem('swarm.identityCache', JSON.stringify({ ts: this.identityCacheTs, records: arr }));
+    } catch {}
+  }
+
+  loadIdentityCache() {
+    try {
+      const raw = localStorage.getItem('swarm.identityCache');
+      const obj = JSON.parse(raw || '{}');
+      const arr = Array.isArray(obj?.records) ? obj.records : [];
+      const ts = Number(obj?.ts || 0);
+      if (ts && Date.now() - ts < this.cacheTtlMs) {
+        this.identityCache = arr;
+        this.identityCacheTs = ts;
+      }
+    } catch {}
+    return this.identityCache;
+  }
+
+  cacheDeviceRecords(list) {
+    const arr = Array.isArray(list) ? list : [];
+    this.deviceCache = arr;
+    this.deviceCacheTs = Date.now();
+    try {
+      localStorage.setItem('swarm.deviceCache', JSON.stringify({ ts: this.deviceCacheTs, records: arr }));
+    } catch {}
+  }
+
+  loadDeviceCache() {
+    try {
+      const raw = localStorage.getItem('swarm.deviceCache');
+      const obj = JSON.parse(raw || '{}');
+      const arr = Array.isArray(obj?.records) ? obj.records : [];
+      const ts = Number(obj?.ts || 0);
+      if (ts && Date.now() - ts < this.cacheTtlMs) {
+        this.deviceCache = arr;
+        this.deviceCacheTs = ts;
+      }
+    } catch {}
+    return this.deviceCache;
+  }
+
+  loadLastKnown() {
+    try {
+      const raw = localStorage.getItem('swarm.lastPeers');
+      const arr = JSON.parse(raw || '[]');
+      if (Array.isArray(arr)) this.lastKnown = arr;
+    } catch {}
+    return this.lastKnown;
+  }
+
+  getFallbackPeers() {
+    const preferred = this.lastKnown && this.lastKnown.length > 0
+      ? this.lastKnown
+      : (this.deviceCache || []).map(d => String(d?.devicePk || '').trim()).filter(Boolean);
+    return preferred;
+  }
+
+  _markSeen(pk) {
+    const k = String(pk || '').trim();
+    if (!k) return;
+    this.swarmSeen.set(k, Date.now());
+  }
+
+  getSwarmSeen(pk) {
+    return this.swarmSeen.get(pk) || 0;
+  }
+
+  getCacheAges() {
+    return {
+      identity: this.identityCacheTs ? Date.now() - this.identityCacheTs : 0,
+      device: this.deviceCacheTs ? Date.now() - this.deviceCacheTs : 0,
+    };
+  }
+}
 
 function _deriveConnState() {
   const r = relayState;
   const d = daemonState;
+  const s = swarmState;
 
   if (d !== 'online') {
-    if (r === 'open') return 'degraded';
     if (r === 'connecting') return 'connecting';
     return 'disconnected';
   }
 
-  if (r === 'open') return 'connected';
-  if (r === 'connecting') return 'connecting';
+  if (r === 'open' && s === 'open') return 'connected';
+  if (r === 'open' && (s === 'offline' || s === 'error' || s === 'disabled')) return 'degraded';
+  if (s === 'open' && (r === 'offline' || r === 'error' || r === 'closed')) return 'swarm-only';
+  if (r === 'connecting' || s === 'connecting') return 'connecting';
   if (r === 'error' || r === 'closed') return 'error';
   return 'disconnected';
 }
 
+function _deriveConnLabel() {
+  const r = relayState;
+  const d = daemonState;
+  const s = swarmState;
+
+  if (d !== 'online') {
+    if (r === 'connecting') return 'Connecting to nostr...';
+    return 'Disconnected';
+  }
+
+  if (r === 'connecting') return 'Connecting to nostr...';
+  if (r === 'open' && s === 'connecting') return 'Connecting to swarm...';
+  if (r === 'open' && s === 'open') return 'Fully connected';
+  if (r === 'open' && (s === 'offline' || s === 'error' || s === 'disabled')) return 'Partially connected';
+  if (s === 'open' && (r === 'offline' || r === 'error' || r === 'closed')) return 'Swarm only';
+  if (r === 'error' || r === 'closed') return 'Disconnected';
+  return 'Disconnected';
+}
+
 function _pushConnLog(reason = '') {
   const state = _deriveConnState();
+  const label = _deriveConnLabel();
+  connStateText.textContent = label;
   if (state === connDerived && connStateLog.length > 0) return;
 
   connDerived = state;
-  connStateText.textContent = state;
 
   connStateLog.unshift({ ts: Date.now(), state, reason: String(reason || '') });
   while (connStateLog.length > 25) connStateLog.pop();
@@ -143,19 +496,46 @@ function setRelayState(s, reason = '') {
   relayState = String(s || 'offline');
   popRelay.textContent = relayState;
 
-  connDot.classList.remove('conn-off', 'conn-open', 'conn-err', 'conn-conn');
-  if (relayState === 'open') connDot.classList.add('conn-open');
-  else if (relayState === 'connecting') connDot.classList.add('conn-conn');
-  else if (relayState === 'error' || relayState === 'closed') connDot.classList.add('conn-err');
-  else connDot.classList.add('conn-off');
-
+  _setConnDot();
   _pushConnLog(reason);
+}
+
+function formatAge(ms) {
+  if (!ms || ms < 0) return 'n/a';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
 }
 
 function setDaemonState(s, reason = '') {
   daemonState = String(s || 'unknown');
   popDaemon.textContent = daemonState;
   _pushConnLog(reason);
+}
+
+function setSwarmState(s, reason = '') {
+  swarmState = String(s || 'offline');
+  if (popSwarm) popSwarm.textContent = swarmState;
+  if (popSwarmCache && swarm) {
+    const ages = swarm.getCacheAges();
+    const oldest = Math.max(ages.identity || 0, ages.device || 0);
+    popSwarmCache.textContent = oldest ? `${formatAge(oldest)} old` : 'n/a';
+  }
+  _setConnDot();
+  _pushConnLog(reason);
+}
+
+function _setConnDot() {
+  connDot.classList.remove('conn-off', 'conn-open', 'conn-err', 'conn-conn');
+  if (relayState === 'open' || swarmState === 'open') connDot.classList.add('conn-open');
+  else if (relayState === 'connecting' || swarmState === 'connecting') connDot.classList.add('conn-conn');
+  else if (relayState === 'error' || relayState === 'closed') connDot.classList.add('conn-err');
+  else connDot.classList.add('conn-off');
 }
 
 function showConnPopover() { connPopover.classList.remove('hidden'); }
@@ -462,9 +842,17 @@ function renderZones(list) {
       for (const e of zoneMembers) {
         const row = document.createElement('div');
         row.className = 'item';
+        const nostrSeen = Number(e.lastSeen || 0);
+        const swarmSeen = swarm ? swarm.getSwarmSeen(e.devicePk) : 0;
+        const sources = [
+          nostrSeen ? 'nostr' : '',
+          swarmSeen ? 'swarm' : '',
+        ].filter(Boolean).join(' + ') || 'unknown';
         row.innerHTML = `
           <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
-          <div class="itemMeta">Last seen ${new Date(e.lastSeen || Date.now()).toLocaleString()}</div>
+          <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
+          <div class="itemMeta">Nostr seen ${nostrSeen ? new Date(nostrSeen).toLocaleString() : 'n/a'}</div>
+          <div class="itemMeta">Swarm seen ${swarmSeen ? new Date(swarmSeen).toLocaleString() : 'n/a'}</div>
         `;
         listEl.appendChild(row);
       }
@@ -506,9 +894,17 @@ function renderPeers(list) {
   for (const e of deviceEntries) {
     const item = document.createElement('div');
     item.className = 'item';
+    const nostrSeen = Number(e.lastSeen || 0);
+    const swarmSeen = swarm ? swarm.getSwarmSeen(e.devicePk) : 0;
+    const sources = [
+      nostrSeen ? 'nostr' : '',
+      swarmSeen ? 'swarm' : '',
+    ].filter(Boolean).join(' + ') || 'unknown';
     item.innerHTML = `
       <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
-      <div class="itemMeta">Last seen ${new Date(e.lastSeen || Date.now()).toLocaleString()}</div>
+      <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
+      <div class="itemMeta">Nostr seen ${nostrSeen ? new Date(nostrSeen).toLocaleString() : 'n/a'}</div>
+      <div class="itemMeta">Swarm seen ${swarmSeen ? new Date(swarmSeen).toLocaleString() : 'n/a'}</div>
     `;
     peersList.appendChild(item);
   }
@@ -546,6 +942,8 @@ async function refreshAll() {
   const blocked = await client.call('blocked.list', {}, { timeoutMs: 20000 });
   const directory = await client.call('directory.list', {}, { timeoutMs: 20000 });
   const zones = await client.call('zones.list', {}, { timeoutMs: 20000 });
+  const swarmDevices = await client.call('swarm.device.list', {}, { timeoutMs: 20000 }).catch(() => []);
+  const swarmIdentities = await client.call('swarm.identity.list', {}, { timeoutMs: 20000 }).catch(() => []);
   const notifs = await client.call('notifications.list', {}, { timeoutMs: 20000 });
   const myLabel = await client.call('device.getLabel', {}, { timeoutMs: 20000 });
 
@@ -586,6 +984,18 @@ async function refreshAll() {
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
   ensureOnboardingState(ident);
+  if (swarm && ident?.linked) {
+    swarm.setLocalPk(st.pk || '');
+    swarm.setPeers(swarmDevices || []);
+    swarm.cacheIdentityRecords(swarmIdentities || []);
+    swarm.cacheDeviceRecords(swarmDevices || []);
+    if (!swarmBootRequested) {
+      swarmBootRequested = true;
+      client.call('swarm.discovery.request', {}, { timeoutMs: 20000 }).catch(() => {});
+    }
+  } else {
+    setSwarmState('disabled');
+  }
 
   return { st, ident };
 }
@@ -861,16 +1271,21 @@ function startSharedRelayPipe(client, relayUrl) {
     const msg = ev.data || {};
     if (msg.type === 'relay.status') {
       setRelayState(msg.state, msg.reason || '');
-      client.call('relay.status', {
-        state: msg.state,
-        url: msg.url || '',
-        code: msg.code ?? null,
-        reason: msg.reason ?? ''
-      }, { timeoutMs: 20000 }).catch(() => {});
+      if (clientReady) {
+        client.call('relay.status', {
+          state: msg.state,
+          url: msg.url || '',
+          code: msg.code ?? null,
+          reason: msg.reason ?? ''
+        }, { timeoutMs: 20000 }).catch((e) => console.error('relay.status rpc failed', e));
+      }
       return;
     }
     if (msg.type === 'relay.rx' && typeof msg.data === 'string') {
-      client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000 }).catch(() => {});
+      if (clientReady) {
+        client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000 })
+          .catch((e) => console.error('relay.rx rpc failed', e));
+      }
       return;
     }
   };
@@ -887,6 +1302,10 @@ function startSharedRelayPipe(client, relayUrl) {
 }
 
 (async function main() {
+  // Default to onboarding until SW state is confirmed.
+  showActivity('onboarding');
+  setOnboardStep(1);
+
   client = new IdentityClient({
     onEvent: (evt) => {
       if (evt?.type === 'log') {
@@ -904,12 +1323,30 @@ function startSharedRelayPipe(client, relayUrl) {
         }
         console.log('[sw]', msg);
       }
+      if (evt?.type === 'swarm_signal') {
+        if (swarm) swarm.onSignal(evt).catch(() => {});
+      }
       if (evt?.type === 'notify') refreshAll().catch(() => {});
     }
   });
 
-  startSharedRelayPipe(client, 'wss://relay.snort.social');
   await client.ready().catch((e) => console.error(e));
+  clientReady = client.isServiceWorkerAvailable();
+  if (clientReady) {
+    startSharedRelayPipe(client, 'wss://relay.snort.social');
+  } else {
+    setDaemonState('offline', 'sw unavailable');
+  }
+
+  swarm = new SwarmTransport({ client, onState: (s) => setSwarmState(s) });
+  swarm.loadSuccess();
+  swarm.loadIdentityCache();
+  swarm.loadDeviceCache();
+  swarm.loadLastKnown();
+  const fallbackPeers = swarm.getFallbackPeers();
+  if (fallbackPeers && fallbackPeers.length > 0) {
+    swarm.setPeers(fallbackPeers.map(pk => ({ devicePk: pk })));
+  }
 
   wireUi();
   _pushConnLog('init');
@@ -917,12 +1354,31 @@ function startSharedRelayPipe(client, relayUrl) {
   // Default radio selection: webauthn if supported
   setSecurityChoice('webauthn');
 
-  await refreshAll();
-  const linked = await ensureOnboardingFlow();
-  if (linked) {
-    setSettingsTab('profile');
-    await postIdentityLinkedFlow();
-  } else {
-    await applyUrlParams();
+  try {
+    await refreshAll();
+    const linked = await ensureOnboardingFlow();
+    if (linked) {
+      setSettingsTab('profile');
+      await postIdentityLinkedFlow();
+    } else {
+      await applyUrlParams();
+    }
+  } catch (e) {
+    console.error('refreshAll failed', e);
+    setDaemonState('offline', 'rpc failed');
+    showActivity('onboarding');
+    setOnboardStep(1);
   }
+
+  // Health check: if SW drops, fall back to onboarding.
+  setInterval(async () => {
+    try {
+      await client.call('device.getState', {}, { timeoutMs: 5000 });
+      setDaemonState('online', 'rpc ok');
+    } catch {
+      setDaemonState('offline', 'rpc fail');
+      showActivity('onboarding');
+      setOnboardStep(1);
+    }
+  }, 10000);
 })();

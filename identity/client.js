@@ -11,6 +11,7 @@ export class IdentityClient {
     this._reqId = 1;
     this._pending = new Map();
     this._readyPromise = null;
+    this._reg = null;
 
     // Serialize calls to prevent SW/IDB contention.
     this._queue = Promise.resolve();
@@ -31,26 +32,53 @@ export class IdentityClient {
         throw new Error("Service Worker not supported in this browser");
       }
 
+      console.log("[client] ready: checking SW registration");
       // Ensure SW is registered. sw.js is an ES module.
       let reg = await navigator.serviceWorker.getRegistration("./");
       if (!reg) reg = await navigator.serviceWorker.getRegistration();
 
       if (!reg) {
         this.onEvent({ type: "log", message: "registering service worker ./sw.js (module)" });
+        console.log("[client] registering SW ./sw.js");
         reg = await navigator.serviceWorker.register("./sw.js", {
           scope: "./",
           type: "module",
         });
       }
 
-      await navigator.serviceWorker.ready;
+      this._reg = reg;
+      console.log("[client] waiting for SW ready");
+      await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise((resolve) => setTimeout(resolve, 3000)),
+      ]);
 
       // First load after registration may need a controller; wait a bit.
-      await this._waitForController(9000);
+      console.log("[client] waiting for controller");
+      let controllerOk = false;
+      try {
+        await this._waitForController(9000);
+        controllerOk = true;
+      } catch (e) {
+        // On first registration, controller may not attach until reload.
+        const k = "sw:reloaded";
+        if (!sessionStorage.getItem(k)) {
+          sessionStorage.setItem(k, "1");
+          console.warn("[client] no controller; reloading to attach SW");
+          location.reload();
+          return reg;
+        }
+        console.warn("[client] controller unavailable; continuing with direct port fallback");
+      }
+      if (controllerOk) console.log("[client] controller ready");
       return reg;
     })();
 
     return this._readyPromise;
+  }
+
+  isServiceWorkerAvailable() {
+    return !!(navigator.serviceWorker.controller || this._reg?.active || this._reg?.waiting || this._reg?.installing);
   }
 
   /**
@@ -72,9 +100,7 @@ export class IdentityClient {
 
     await this.ready();
 
-    if (!navigator.serviceWorker.controller) {
-      await this._waitForController(8000);
-    }
+    const controller = navigator.serviceWorker.controller;
 
     const id = this._reqId++;
     const payload = { type: "req", id, method, params };
@@ -88,7 +114,40 @@ export class IdentityClient {
       this._pending.set(id, { resolve, reject, timer });
 
       try {
-        navigator.serviceWorker.controller.postMessage(payload);
+        if (controller) {
+          controller.postMessage(payload);
+        } else if (this._reg?.active) {
+          const ch = new MessageChannel();
+          ch.port1.onmessage = (e) => {
+            const msg = e.data || {};
+            if (msg.type !== "res" || msg.id !== id) return;
+            const p = this._pending.get(msg.id);
+            if (!p) return;
+            clearTimeout(p.timer);
+            this._pending.delete(msg.id);
+            if (msg.ok) p.resolve(msg.result);
+            else p.reject(new Error(msg.error || "unknown error"));
+          };
+          this._reg.active.postMessage(payload, [ch.port2]);
+        } else {
+          const any = this._reg?.waiting || this._reg?.installing;
+          if (any) {
+            const ch = new MessageChannel();
+            ch.port1.onmessage = (e) => {
+              const msg = e.data || {};
+              if (msg.type !== "res" || msg.id !== id) return;
+              const p = this._pending.get(msg.id);
+              if (!p) return;
+              clearTimeout(p.timer);
+              this._pending.delete(msg.id);
+              if (msg.ok) p.resolve(msg.result);
+              else p.reject(new Error(msg.error || "unknown error"));
+            };
+            any.postMessage(payload, [ch.port2]);
+          } else {
+            throw new Error("service worker controller not available");
+          }
+        }
       } catch (e) {
         clearTimeout(timer);
         this._pending.delete(id);
@@ -128,11 +187,13 @@ export class IdentityClient {
       const tick = () => {
         if (navigator.serviceWorker.controller) {
           cleanup();
+          console.log("[client] controllerchange: controller set");
           resolve();
           return;
         }
         if (Date.now() - start > timeoutMs) {
           cleanup();
+          console.warn("[client] controller wait timeout");
           reject(new Error("service worker controller not available"));
         }
       };

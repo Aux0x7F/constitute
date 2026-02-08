@@ -6,11 +6,13 @@ import { getIdentity, setIdentity } from './identityStore.js';
 import { notifAdd, notifClear, notifRemove } from './notifs.js';
 import { pendingAdd, pendingRemove } from './pending.js';
 import { getSubId, getAppTag, subscribeOnRelayOpen as relaySubscribeOnRelayOpen } from './relayOut.js';
-import { log, pokeUi } from './uiBus.js';
+import { emit, log, pokeUi } from './uiBus.js';
 import { blockedAdd, blockedIs, blockedRemove } from './blocklist.js';
 import { kvGet, kvSet } from './idb.js';
 import { directoryUpsert } from './directory.js';
 import { isZoneJoined, joinZone, addSelfToZoneList, publishZonePresence, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, publishZoneProbe, setZoneList, getZoneList, updateZoneName, listZones } from './zone.js';
+import { putIdentityRecord, putDeviceRecord, validateRecord, makeIdentityRecord, makeDeviceRecord } from './swarm/index.js';
+import { publishAppEvent } from './relayOut.js';
 
 const REPLAY_WINDOW_SEC = 10 * 60;
 const REPLAY_SKEW_SEC = 2 * 60;
@@ -460,6 +462,49 @@ export async function handleRelayFrame(sw, raw) {
     ident.devices = (ident.devices || []).filter(d => d.pk !== targetPk);
     await setIdentity(ident);
     pokeUi(sw);
+    return;
+  }
+
+  // --- Swarm discovery records ---
+  if (payload.type === 'swarm_identity_record' && payload.record) {
+    const ok = await validateRecord(payload.record, 'identity');
+    if (!ok) { log(sw, 'swarm identity record rejected'); return; }
+    await putIdentityRecord(payload.record).catch(() => {});
+    log(sw, 'swarm identity record stored');
+    pokeUi(sw);
+    return;
+  }
+  if (payload.type === 'swarm_device_record' && payload.record) {
+    const ok = await validateRecord(payload.record, 'device');
+    if (!ok) { log(sw, 'swarm device record rejected'); return; }
+    await putDeviceRecord(payload.record).catch(() => {});
+    log(sw, 'swarm device record stored');
+    pokeUi(sw);
+    return;
+  }
+  if (payload.type === 'swarm_discovery_request') {
+    if (!ident?.linked) return;
+    log(sw, 'swarm discovery request received');
+    if (payload.want?.includes('identity')) {
+      const rec = await makeIdentityRecord().catch(() => null);
+      if (rec) await publishAppEvent(sw, { type: 'swarm_identity_record', record: rec }).catch(() => {});
+    }
+    if (payload.want?.includes('device')) {
+      const rec = await makeDeviceRecord().catch(() => null);
+      if (rec) await publishAppEvent(sw, { type: 'swarm_device_record', record: rec }).catch(() => {});
+    }
+    return;
+  }
+  // --- Swarm signal (WebRTC signaling) ---
+  if (payload.type === 'swarm_signal') {
+    const to = String(payload.to || '').trim();
+    if (!to || to !== dev?.nostr?.pk) return;
+    emit(sw, {
+      type: 'swarm_signal',
+      from: String(payload.from || '').trim(),
+      signalType: String(payload.signalType || '').trim(),
+      data: payload.data ?? null,
+    });
     return;
   }
 }

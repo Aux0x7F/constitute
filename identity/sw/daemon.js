@@ -16,6 +16,7 @@ export function startDaemon(sw) {
     if (!msg || msg.type !== 'req') return;
 
     const { id, method, params } = msg;
+    const replyPort = e.ports && e.ports[0] ? e.ports[0] : null;
 
     (async () => {
       try {
@@ -26,9 +27,11 @@ export function startDaemon(sw) {
           () => relayState,
           (s) => { relayState = s; }
         );
-        e.source.postMessage({ type: 'res', id, ok: true, result });
+        if (replyPort) replyPort.postMessage({ type: 'res', id, ok: true, result });
+        else if (e.source?.postMessage) e.source.postMessage({ type: 'res', id, ok: true, result });
       } catch (err) {
-        e.source.postMessage({ type: 'res', id, ok: false, error: String(err?.message || err) });
+        if (replyPort) replyPort.postMessage({ type: 'res', id, ok: false, error: String(err?.message || err) });
+        else if (e.source?.postMessage) e.source.postMessage({ type: 'res', id, ok: false, error: String(err?.message || err) });
       }
     })();
   });

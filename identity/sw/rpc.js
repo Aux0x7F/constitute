@@ -14,8 +14,20 @@ import { handleRelayFrame } from './relayIn.js';
 import { blockedList, blockedRemove } from './blocklist.js';
 import { directoryList } from './directory.js';
 import { listZones, addZone, joinZone, publishZonePresence, publishZoneProbe, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, addSelfToZoneList, getZoneList, getZoneName, getPendingZoneKey, setPendingZoneKey, clearPendingZoneKey } from './zone.js';
+import {
+  makeIdentityRecord,
+  makeDeviceRecord,
+  putIdentityRecord,
+  putDeviceRecord,
+  resolveIdentityById,
+  resolveDeviceByPk,
+  resolveIdentityForDevice,
+  listIdentityRecords,
+  listDeviceRecords,
+} from './swarm/index.js';
 
 let presenceTimer = null;
+let swarmPublishTimer = null;
 
 function makePairCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
@@ -38,6 +50,22 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
         }
       }
     }, 90 * 1000);
+  }
+
+  async function startSwarmPublishLoop() {
+    if (swarmPublishTimer) return;
+    const SWARM_PUB_MS = 60 * 1000;
+    const publish = async () => {
+      const ident = await getIdentity();
+      if (!ident?.linked) return;
+      const irec = await makeIdentityRecord().catch(() => null);
+      const drec = await makeDeviceRecord().catch(() => null);
+      if (irec) await publishAppEvent(sw, { type: 'swarm_identity_record', record: irec }).catch(() => {});
+      if (drec) await publishAppEvent(sw, { type: 'swarm_device_record', record: drec }).catch(() => {});
+      log(sw, 'swarm discovery published');
+    };
+    await publish();
+    swarmPublishTimer = setInterval(publish, SWARM_PUB_MS);
   }
   // --- device state ---
   if (method === 'device.getState') {
@@ -219,6 +247,70 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return await directoryList();
   }
 
+  // --- swarm discovery (local cache, signed records) ---
+  if (method === 'swarm.identity.record') {
+    return await makeIdentityRecord();
+  }
+  if (method === 'swarm.device.record') {
+    return await makeDeviceRecord();
+  }
+  if (method === 'swarm.identity.put') {
+    return await putIdentityRecord(params?.record || null);
+  }
+  if (method === 'swarm.device.put') {
+    return await putDeviceRecord(params?.record || null);
+  }
+  if (method === 'swarm.identity.get') {
+    const id = String(params?.identityId || '').trim();
+    if (!id) throw new Error('missing identityId');
+    return await resolveIdentityById(id);
+  }
+  if (method === 'swarm.identity.list') {
+    return await listIdentityRecords();
+  }
+  if (method === 'swarm.device.get') {
+    const pk = String(params?.devicePk || '').trim();
+    if (!pk) throw new Error('missing devicePk');
+    return await resolveDeviceByPk(pk);
+  }
+  if (method === 'swarm.device.list') {
+    return await listDeviceRecords();
+  }
+  if (method === 'swarm.identity.forDevice') {
+    const pk = String(params?.devicePk || '').trim();
+    if (!pk) throw new Error('missing devicePk');
+    return await resolveIdentityForDevice(pk);
+  }
+  if (method === 'swarm.discovery.publish') {
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    const irec = await makeIdentityRecord().catch(() => null);
+    const drec = await makeDeviceRecord().catch(() => null);
+    if (irec) await publishAppEvent(sw, { type: 'swarm_identity_record', record: irec }).catch(() => {});
+    if (drec) await publishAppEvent(sw, { type: 'swarm_device_record', record: drec }).catch(() => {});
+    return { ok: true };
+  }
+  if (method === 'swarm.discovery.request') {
+    await publishAppEvent(sw, { type: 'swarm_discovery_request', want: ['identity', 'device'] }).catch(() => {});
+    return { ok: true };
+  }
+  if (method === 'swarm.signal.send') {
+    const toPk = String(params?.toPk || '').trim();
+    const signalType = String(params?.signalType || '').trim();
+    const data = params?.data ?? null;
+    const from = await ensureDevice();
+    if (!toPk || !signalType) throw new Error('missing toPk or signalType');
+    await publishAppEvent(sw, {
+      type: 'swarm_signal',
+      to: toPk,
+      from: from.nostr.pk,
+      signalType,
+      data,
+      ts: Date.now(),
+    }, [['p', toPk]]);
+    return { ok: true };
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();
@@ -388,6 +480,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
         await publishZoneList(sw, ident, n.key, list.members, list.ts, n.name || "").catch(() => {});
       }
       await startPresenceLoop();
+      await startSwarmPublishLoop();
     }
     return { ok: true };
   }

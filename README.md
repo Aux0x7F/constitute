@@ -5,7 +5,9 @@ Browser-native, decentralized identity and device association system with relay-
 ## Status
 - Prototype: active development
 - Discovery bootstrap achieved (zones + directory)
-- Next focus: swarm transport (DHT / P2P)
+- P0: native gateway backbone (constitute-gateway)
+- P2: browser swarm transport (TURN-backed)
+- P3: constitute refactor
 
 ## Key Concepts
 - Identity: cryptographic grouping of devices
@@ -48,15 +50,16 @@ See `ARCHITECTURE.md` for the full system overview and roadmap.
 - Zone presence + member lists update the Directory
 
 ## Roadmap Snapshot
-- Stabilize zone list propagation + naming
-- Add Kademlia-style DHT (primary transport)
-- Swarm transport and discovery
+- P0: constitute-gateway (native mesh/relay backbone)
+- P2: browser swarm transport (TURN fallback)
+- P3: refactor and modularization
 - Shared encrypted data layers
 - Messaging maturation + double-ratchet encryption
 
 ## TODO
 - Improve Peers UX clarity
-- Swarm transport and discovery
+- Gateway protocol + auth envelope
+- Constitute-gateway repo scaffold + run docs
 - Shared encrypted data layers
 - Messaging maturation + double-ratchet encryption
 

@@ -88,11 +88,14 @@ Service Worker (Identity Daemon)
 - Window only transports frames, never secrets
 
 ### Planned
-- Swarm / Peer-to-Peer Transport
-  - WebRTC mesh or DHT
-  - Relay becomes optional bootstrap
+- Gateway Backbone (native)
+  - QUIC/UDP mesh
+  - Relay/bridge mode for browsers
+  - Federated/volunteer relays (no single owner)
+- Browser Swarm Transport
+  - WebRTC + TURN fallback
+  - Relay used only for bootstrap/signaling
   - Encrypted room state synchronization
-  - Device discovery via distributed lookup
 
 ## Discovery + Directory
 
@@ -162,9 +165,9 @@ Used for:
 - Clean up Peers UX
 
 ### Mid Term
-- Swarm/DHT bootstrap integration (primary transport)
-- Peer-to-peer synchronization
-- Replace relay dependency for most state
+- P0: constitute-gateway repo (native backbone)
+- P2: browser swarm transport (TURN-backed)
+- P3: codebase refactor + module boundaries
 - Shared encrypted data layers
 - Messaging maturation + double-ratchet encryption
 
