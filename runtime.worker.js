@@ -1,5 +1,6 @@
 import {
   AGREEMENT,
+  FABRIC,
   PROJECTION,
   SERVICE_REGISTRY,
   SWARM,
@@ -18,6 +19,8 @@ import {
   assertEventFabricProcessorContract,
   assertCybersecProcessorSeed,
   assertConsumerFloor,
+  assertContractTarget,
+  assertContractTargetRegistryPosture,
   assertMaterializationBudget,
   assertPrivateContentEnvelope,
   assertProjectionPolicy,
@@ -25,7 +28,11 @@ import {
   assertProjectionSnapshot,
   assertServiceRegistryClaim,
   assertServiceRegistryMaterialization,
+  assertHostFabricFulfillmentPlan,
+  assertHostFabricMemberContribution,
+  assertLifecyclePlanPosture,
   assertResolvedMemberRef,
+  assertSubstrateAssociationHandoff,
   assertProjectionRepairPosture,
   assertResourcePosture,
   assertResourceProfile,
@@ -7679,6 +7686,74 @@ function serviceRecordHealth(record) {
   return safeClone(health);
 }
 
+function serviceRecordLegacyPathFallback(record) {
+  const fallback = record?.legacyPathFallback || record?.legacy_path_fallback;
+  return fallback && typeof fallback === 'object' ? safeClone(fallback) : null;
+}
+
+function serviceRecordGatewayAssociationPosture(record) {
+  const posture = record?.gatewayAssociationPosture || record?.gateway_association_posture;
+  return posture && typeof posture === 'object' ? posture : null;
+}
+
+function serviceRecordHostFabricPosture(record) {
+  const posture = serviceRecordGatewayAssociationPosture(record);
+  if (!posture) return null;
+  try {
+    const substrateAssociationHandoff = assertSubstrateAssociationHandoff(safeClone(
+      posture.substrateAssociationHandoff || posture.substrate_association_handoff,
+    ));
+    const gatewayAssociationContribution = assertHostFabricMemberContribution(safeClone(
+      posture.gatewayAssociationContribution || posture.gateway_association_contribution,
+    ));
+    const lifecyclePlan = assertLifecyclePlanPosture(safeClone(
+      posture.lifecyclePlan || posture.lifecycle_plan,
+    ));
+    const fulfillmentPlan = assertHostFabricFulfillmentPlan(safeClone(
+      posture.fulfillmentPlan || posture.fulfillment_plan,
+    ));
+    const blockedReasons = uniqueTrimmedStrings([
+      ...normalizeArray(substrateAssociationHandoff.blockedReasons),
+      ...normalizeArray(gatewayAssociationContribution.blockedReasons),
+      ...normalizeArray(lifecyclePlan.blockedReasons),
+      ...normalizeArray(fulfillmentPlan.blockedReasons),
+      ...normalizeArray(fulfillmentPlan.missingRoleRefs).map((ref) => `missing:${ref}`),
+    ]);
+    const evidenceRefs = uniqueTrimmedStrings([
+      ...normalizeArray(substrateAssociationHandoff.evidenceRefs),
+      ...normalizeArray(gatewayAssociationContribution.evidenceRefs),
+      ...normalizeArray(lifecyclePlan.evidenceRefs),
+      ...normalizeArray(fulfillmentPlan.evidenceRefs),
+    ]);
+    return {
+      state: fulfillmentPlan.state || lifecyclePlan.state || gatewayAssociationContribution.state,
+      fabricRef: fulfillmentPlan.fabricRef || gatewayAssociationContribution.fabricRef || substrateAssociationHandoff.fabricRef,
+      hostRef: fulfillmentPlan.hostRef || gatewayAssociationContribution.hostRef || substrateAssociationHandoff.hostRef,
+      associationHandoffRef: fulfillmentPlan.associationHandoffRef || substrateAssociationHandoff.handoffId,
+      gatewayAssociationRefs: normalizeArray(substrateAssociationHandoff.gatewayAssociationRefs),
+      memberContributionRefs: normalizeArray(fulfillmentPlan.memberContributionRefs),
+      lifecyclePlanRefs: normalizeArray(fulfillmentPlan.lifecyclePlanRefs),
+      requiredRoleRefs: normalizeArray(fulfillmentPlan.requiredRoleRefs),
+      missingRoleRefs: normalizeArray(fulfillmentPlan.missingRoleRefs),
+      blockedReasons,
+      evidenceRefs,
+      substrateAssociationHandoff,
+      gatewayAssociationContribution,
+      lifecyclePlan,
+      fulfillmentPlan,
+    };
+  } catch (error) {
+    recordRuntimeEvent('runtime.msa.gateway_association.ignored', {
+      level: 'warn',
+      service: serviceRecordService(record),
+      servicePk: serviceRecordServicePk(record),
+      hostGatewayPk: serviceRecordHostGatewayPk(record),
+      error: { message: String(error?.message || error) },
+    });
+    return null;
+  }
+}
+
 function normalizeServiceZoneScope(value) {
   if (!value) return null;
   const source = value && typeof value === 'object' ? value : { zoneId: value };
@@ -7832,6 +7907,9 @@ function hostedServiceRecords() {
           hostGatewayLabel: hosted.hostGatewayLabel || hostGatewayLabel,
           identityId: serviceRecordIdentityId(hosted) || serviceRecordIdentityId(record) || undefined,
           zoneScope: serviceRecordZoneScope(hosted) || hostGatewayZoneScope || undefined,
+          gatewayAssociationPosture: serviceRecordGatewayAssociationPosture(hosted)
+            || serviceRecordGatewayAssociationPosture(record)
+            || undefined,
         };
         const service = serviceRecordService(merged);
         const servicePk = serviceRecordServicePk(merged);
@@ -7861,6 +7939,8 @@ function serviceDescriptorFromRecord(record) {
     surfaceChannel,
     summary: serviceRecordSummary(record),
     health: serviceRecordHealth(record),
+    hostFabric: serviceRecordHostFabricPosture(record),
+    legacyPathFallback: serviceRecordLegacyPathFallback(record),
     nodes: serviceRecordNodes(record),
   };
 }
@@ -7903,8 +7983,17 @@ function serviceRegistryClaimFromDescriptor(descriptor, issuedAt = nowMs()) {
       evidenceRefs: uniqueTrimmedStrings([
         descriptor.liveEdgeRoute?.memberRef ? `swarm.directory:${descriptor.liveEdgeRoute.memberRef}` : '',
         descriptor.surfaceChannel ? `projection:${descriptor.surfaceChannel}` : '',
+        descriptor.hostFabric?.associationHandoffRef,
+        ...normalizeArray(descriptor.hostFabric?.memberContributionRefs),
+        ...normalizeArray(descriptor.hostFabric?.lifecyclePlanRefs),
+        ...normalizeArray(descriptor.hostFabric?.evidenceRefs),
       ]),
-      safeFacts: { service, surfaceChannel: descriptor.surfaceChannel || '' },
+      safeFacts: {
+        service,
+        surfaceChannel: descriptor.surfaceChannel || '',
+        hostFabricState: descriptor.hostFabric?.state || '',
+        legacyPathFallbackState: descriptor.legacyPathFallback?.state || '',
+      },
       issuedAt,
       expiresAt: issuedAt + 90_000,
     });
@@ -8022,6 +8111,7 @@ function serviceCatalog() {
       ...descriptor,
       summary: String(surface?.summary || descriptor.summary || '').trim(),
       health: surface?.health && typeof surface.health === 'object' ? safeClone(surface.health) : descriptor.health,
+      legacyPathFallback: descriptor.legacyPathFallback || null,
       healthNode: String(surface?.healthNode || '').trim(),
       nodes: Array.isArray(surface?.nodes)
         ? surface.nodes.map((node) => ({
@@ -8043,6 +8133,308 @@ function serviceCatalog() {
     updatedAt,
     services,
     registry: serviceRegistryMaterializationFromServices(services, updatedAt),
+  };
+}
+
+function pushValidatedRecord(out, seen, candidate, idKeys, validator, eventKind) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return;
+  try {
+    const record = validator(safeClone(candidate));
+    const id = idKeys
+      .map((key) => String(record?.[key] || '').trim())
+      .find(Boolean)
+      || JSON.stringify(record);
+    if (!seen.has(id)) {
+      seen.add(id);
+      out.push(record);
+    }
+  } catch (error) {
+    recordRuntimeEvent(eventKind, {
+      level: 'warn',
+      error: { message: String(error?.message || error) },
+    });
+  }
+}
+
+function runtimeHostFabricRecordsFromCatalog(catalog) {
+  const fulfillmentPlans = [];
+  const memberContributions = [];
+  const lifecyclePlans = [];
+  const seenPlans = new Set();
+  const seenContributions = new Set();
+  const seenLifecyclePlans = new Set();
+  for (const service of normalizeArray(catalog?.services)) {
+    const fabric = service?.hostFabric && typeof service.hostFabric === 'object' ? service.hostFabric : {};
+    pushValidatedRecord(
+      fulfillmentPlans,
+      seenPlans,
+      fabric.fulfillmentPlan,
+      ['planId'],
+      assertHostFabricFulfillmentPlan,
+      'runtime.target.fabric_plan.ignored',
+    );
+    pushValidatedRecord(
+      memberContributions,
+      seenContributions,
+      fabric.gatewayAssociationContribution,
+      ['contributionId'],
+      assertHostFabricMemberContribution,
+      'runtime.target.fabric_contribution.ignored',
+    );
+    pushValidatedRecord(
+      lifecyclePlans,
+      seenLifecyclePlans,
+      fabric.lifecyclePlan,
+      ['lifecyclePlanId'],
+      assertLifecyclePlanPosture,
+      'runtime.target.lifecycle_plan.ignored',
+    );
+  }
+  return { fulfillmentPlans, memberContributions, lifecyclePlans };
+}
+
+function targetSlot(slotRef, state, platformFitState, candidateFulfillmentRefs = [], extra = {}) {
+  const selectedFulfillmentRef = String(extra.selectedFulfillmentRef || candidateFulfillmentRefs[0] || '').trim();
+  return {
+    slotRef,
+    state,
+    platformFitState,
+    candidateFulfillmentRefs: uniqueTrimmedStrings(candidateFulfillmentRefs),
+    ...(selectedFulfillmentRef ? { selectedFulfillmentRef } : {}),
+    sourceRefs: uniqueTrimmedStrings(extra.sourceRefs || []),
+    buildRefs: uniqueTrimmedStrings(extra.buildRefs || []),
+    platformRefs: uniqueTrimmedStrings(extra.platformRefs || []),
+    adapterRefs: uniqueTrimmedStrings(extra.adapterRefs || []),
+    proofRequirementRefs: uniqueTrimmedStrings(extra.proofRequirementRefs || []),
+    proofRefs: uniqueTrimmedStrings(extra.proofRefs || []),
+    evidenceRefs: uniqueTrimmedStrings(extra.evidenceRefs || []),
+    blockedReasons: uniqueTrimmedStrings(extra.blockedReasons || []),
+    safeFacts: extra.safeFacts && typeof extra.safeFacts === 'object' ? safeClone(extra.safeFacts) : undefined,
+  };
+}
+
+function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
+  const services = normalizeArray(catalog?.services);
+  const fabricRecords = runtimeHostFabricRecordsFromCatalog(catalog);
+  const serviceRefs = uniqueTrimmedStrings(services.map((service) => service?.serviceRef));
+  const serviceFulfillmentRefs = serviceRefs.map((ref) => `fulfillment:${ref}`);
+  const serviceSlots = services
+    .map((service) => {
+      const serviceName = String(service?.service || '').trim().toLowerCase();
+      const serviceRef = String(service?.serviceRef || '').trim();
+      if (!serviceName || !serviceRef) return null;
+      return targetSlot(
+        `slot:${serviceName}-service`,
+        FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
+        FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
+        [`fulfillment:${serviceRef}`],
+        {
+          sourceRefs: ['projection:swarm.directory', 'projection:retained.services'],
+          evidenceRefs: uniqueTrimmedStrings([
+            `evidence:service-catalog:${serviceName}`,
+            service?.hostFabric?.associationHandoffRef,
+            ...normalizeArray(service?.hostFabric?.evidenceRefs),
+          ]),
+          safeFacts: { service: serviceName },
+        },
+      );
+    })
+    .filter(Boolean);
+  const gatewayFulfillmentRefs = uniqueTrimmedStrings(
+    fabricRecords.memberContributions
+      .filter((contribution) => contribution.role === FABRIC.MEMBER_ROLE.GATEWAY_ASSOCIATION)
+      .map((contribution) => contribution.contributionId),
+  );
+  const runtimeRef = `runtime:${RUNTIME_WORKER_BUILD_ID}`;
+  const targetRef = 'contract-target:desktop-windows-dev:msa-transition';
+  const registryRef = 'contract-target-registry:desktop-windows-dev:msa-transition';
+  const negativeSlotRefs = ['slot:native-client'];
+  const missingSlotRefs = [];
+  const slotPostures = [
+    targetSlot(
+      'slot:gateway',
+      gatewayFulfillmentRefs.length
+        ? FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+        : FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED,
+      gatewayFulfillmentRefs.length
+        ? FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE
+        : FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.DEGRADED,
+      gatewayFulfillmentRefs,
+      {
+        adapterRefs: ['adapter:gateway-association'],
+        evidenceRefs: fabricRecords.memberContributions.flatMap((contribution) => normalizeArray(contribution.evidenceRefs)),
+        blockedReasons: gatewayFulfillmentRefs.length ? [] : ['gatewayAssociationContributionMissing'],
+      },
+    ),
+    targetSlot(
+      'slot:runtime',
+      FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
+      FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
+      [runtimeRef],
+      {
+        platformRefs: ['platform:browser-shared-worker'],
+        adapterRefs: ['adapter:runtime-shared-worker'],
+        evidenceRefs: [`evidence:${runtimeRef}`],
+      },
+    ),
+    targetSlot(
+      'slot:service-manager',
+      FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
+      FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
+      ['fulfillment:service-manager:local-dev'],
+      {
+        platformRefs: ['platform:windows.desktop'],
+        adapterRefs: ['adapter:host-service:windows'],
+        evidenceRefs: ['evidence:service-manager:target-reducer'],
+      },
+    ),
+    targetSlot(
+      'slot:surface',
+      FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
+      FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
+      ['surface:first-party-browser'],
+      {
+        platformRefs: ['platform:browser-window'],
+        adapterRefs: ['adapter:runtime-surface-client'],
+        evidenceRefs: ['evidence:surface:runtime-attach'],
+      },
+    ),
+    targetSlot(
+      'slot:service-catalog',
+      serviceFulfillmentRefs.length
+        ? FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+        : FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED,
+      serviceFulfillmentRefs.length
+        ? FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE
+        : FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.DEGRADED,
+      serviceFulfillmentRefs,
+      {
+        sourceRefs: ['projection:swarm.directory', 'projection:retained.services'],
+        evidenceRefs: ['evidence:runtime:service-catalog'],
+        blockedReasons: serviceFulfillmentRefs.length ? [] : ['serviceCatalogEmpty'],
+      },
+    ),
+    ...serviceSlots,
+    targetSlot(
+      'slot:browser-webrtc',
+      FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
+      FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
+      ['fulfillment:browser-webrtc:authenticated-desktop-browser'],
+      {
+        platformRefs: ['platform:browser-window'],
+        adapterRefs: ['adapter:browser-webrtc'],
+        proofRequirementRefs: ['proof-requirement:media-nonzero-dimensions'],
+        evidenceRefs: [
+          'evidence:runtime:media-transport-profile',
+          'evidence:browser-webrtc:adapter-ready',
+        ],
+      },
+    ),
+    targetSlot(
+      'slot:native-client',
+      FABRIC.CONTRACT_TARGET_SLOT_STATE.NOT_REQUIRED,
+      FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.UNKNOWN,
+      [],
+      {
+        evidenceRefs: ['evidence:target:native-client:not-required'],
+        safeFacts: { reason: 'browser target' },
+      },
+    ),
+  ];
+  const degradedSlotRefs = slotPostures
+    .filter((slot) => slot.state === FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED)
+    .map((slot) => slot.slotRef);
+  const blockedReasons = uniqueTrimmedStrings([
+    ...slotPostures.flatMap((slot) => normalizeArray(slot.blockedReasons)),
+  ]);
+  const target = assertContractTarget({
+    kind: SWARM.RECORD_KIND.CONTRACT_TARGET,
+    targetRef,
+    contractRef: 'app:constitution-runtime-target@msa-transition',
+    profileRef: 'target-profile:desktop-dev',
+    platformRef: 'platform:windows-desktop',
+    state: missingSlotRefs.length || degradedSlotRefs.length
+      ? FABRIC.CONTRACT_TARGET_STATE.DEGRADED
+      : FABRIC.CONTRACT_TARGET_STATE.READY,
+    compatibilityState: missingSlotRefs.length || degradedSlotRefs.length
+      ? FABRIC.CONTRACT_TARGET_COMPATIBILITY_STATE.DEGRADED
+      : FABRIC.CONTRACT_TARGET_COMPATIBILITY_STATE.COMPATIBLE,
+    hostRef: 'host:local-workstation',
+    substrateRef: 'substrate:desktop-windows',
+    modifierRefs: ['modifier:dev'],
+    branchRefs: ['branch:0x/msa-transition'],
+    subbranchRefs: ['subbranch:runtime-target-source'],
+    capabilitySlotRefs: slotPostures.map((slot) => slot.slotRef),
+    adapterPackRef: 'adapter-pack:browser-runtime-local',
+    adapterRefs: [
+      'adapter:runtime-shared-worker',
+      'adapter:runtime-surface-client',
+      'adapter:browser-webrtc',
+      'adapter:host-service:windows',
+    ],
+    negativeSlotRefs,
+    missingSlotRefs,
+    degradedSlotRefs,
+    proofProfileRefs: ['proof-profile:surface-landscape'],
+    proofRefs: [],
+    compatibilityRefs: [`compat:${RUNTIME_WORKER_BUILD_ID}`],
+    evidenceRefs: ['evidence:runtime:target-source', `evidence:${runtimeRef}`],
+    blockedReasons,
+    targetAudience: 'operator',
+    safeFacts: {
+      runtimeBuildId: RUNTIME_WORKER_BUILD_ID,
+      source: 'runtime.snapshot',
+      serviceCount: services.length,
+      nativeClient: 'notRequired',
+    },
+    issuedAt: sampledAt,
+    expiresAt: sampledAt + 60_000,
+  });
+  const registry = assertContractTargetRegistryPosture({
+    kind: SWARM.RECORD_KIND.CONTRACT_TARGET_REGISTRY_POSTURE,
+    registryRef,
+    targetRef,
+    contractRef: target.contractRef,
+    state: missingSlotRefs.length || degradedSlotRefs.length
+      ? FABRIC.CONTRACT_TARGET_REGISTRY_STATE.DEGRADED
+      : FABRIC.CONTRACT_TARGET_REGISTRY_STATE.READY,
+    slotPostures,
+    candidateFulfillmentRefs: uniqueTrimmedStrings([
+      runtimeRef,
+      'surface:first-party-browser',
+      'fulfillment:service-manager:local-dev',
+      ...gatewayFulfillmentRefs,
+      ...serviceFulfillmentRefs,
+      'fulfillment:browser-webrtc:authenticated-desktop-browser',
+    ]),
+    sourceRefs: ['projection:swarm.directory', 'projection:retained.services'],
+    buildRefs: [],
+    adapterRefs: target.adapterRefs,
+    proofRequirementRefs: ['proof-requirement:surface-landscape'],
+    proofRefs: [],
+    evidenceRefs: ['evidence:runtime:target-registry', ...target.evidenceRefs],
+    blockedReasons,
+    safeFacts: {
+      runtimeBuildId: RUNTIME_WORKER_BUILD_ID,
+      source: 'runtime.snapshot',
+      serviceCount: services.length,
+      nativeClient: 'notRequired',
+    },
+    observedAt: sampledAt,
+    expiresAt: sampledAt + 60_000,
+  });
+  return {
+    kind: 'runtime.contract-target.source',
+    state: registry.state,
+    targetRef,
+    registryRef,
+    contractTargets: [target],
+    targetRegistryPostures: [registry],
+    hostFabricFulfillmentPlans: fabricRecords.fulfillmentPlans,
+    hostFabricContributions: fabricRecords.memberContributions,
+    lifecyclePlans: fabricRecords.lifecyclePlans,
+    blockedReasons,
+    observedAt: sampledAt,
   };
 }
 
@@ -9088,7 +9480,17 @@ function applyGatewayHostedSnapshot(record) {
   } else if (cached && Array.isArray(cached.hostedServices) && cached.hostedServices.length > 0) {
     const cachedUpdatedAt = Number(cached.updatedAt || 0);
     if (cachedUpdatedAt >= current.updatedAt) {
-      effectiveHostedServices = cached.hostedServices;
+      effectiveHostedServices = cached.hostedServices.map((service) => ({
+        ...service,
+        legacyPathFallback: {
+          state: 'legacyPathFallback',
+          reason: 'gateway hosted service list absent from current snapshot; retained hosted-service cache used',
+          sourceRefs: ['runtime.shared.state.hostedGatewaySnapshots'],
+          observedAt: nowMs(),
+          currentSnapshotUpdatedAt: current.updatedAt || 0,
+          cachedSnapshotUpdatedAt: cachedUpdatedAt,
+        },
+      }));
     } else if (current.updatedAt >= cachedUpdatedAt) {
       cache[current.pk] = {
         updatedAt: current.updatedAt,
@@ -9181,6 +9583,10 @@ function mergeGatewayHostedServiceRecord(actualRecord, hostedRecord, gatewayReco
     hostGatewayPk: gatewayPk,
     serviceVersion: String(hosted.serviceVersion || hosted.service_version || actual.serviceVersion || actual.service_version || '').trim(),
     swarmEdge: hosted.swarmEdge || hosted.swarm_edge || actual.swarmEdge || actual.swarm_edge || undefined,
+    gatewayAssociationPosture: serviceRecordGatewayAssociationPosture(hosted)
+      || serviceRecordGatewayAssociationPosture(actual)
+      || serviceRecordGatewayAssociationPosture(gateway)
+      || undefined,
     updatedAt: hostedUpdatedAt,
     freshnessMs: Number(hosted.freshnessMs || hosted.freshness_ms || actual.freshnessMs || actual.freshness_ms || 0),
     status: String(hosted.status || actual.status || '').trim(),
@@ -9350,6 +9756,8 @@ function rebuildManagedApplianceSnapshot() {
 
 function runtimeSnapshot() {
   const brokerEndpoint = brokerClientId ? endpoints.get(brokerClientId) : null;
+  const catalog = serviceCatalog();
+  const targetSource = runtimeContractTargetSource(catalog);
   const snapshot = {
     buildId: RUNTIME_WORKER_BUILD_ID,
     updatedAt: runtimeUpdatedAt || nowMs(),
@@ -9362,7 +9770,13 @@ function runtimeSnapshot() {
     managedAppliances: safeClone(managedState.applianceSnapshot),
     resourceNames: safeClone(managedState.resourceNames),
     managedServiceIssue: safeClone(managedState.managedServiceIssue),
-    serviceCatalog: serviceCatalog(),
+    serviceCatalog: catalog,
+    targetSource,
+    contractTargets: safeClone(targetSource.contractTargets),
+    targetRegistryPostures: safeClone(targetSource.targetRegistryPostures),
+    hostFabricFulfillmentPlans: safeClone(targetSource.hostFabricFulfillmentPlans),
+    hostFabricContributions: safeClone(targetSource.hostFabricContributions),
+    lifecyclePlans: safeClone(targetSource.lifecyclePlans),
     edge: edgeSnapshot(),
     swarmQueue: swarmQueueObject(),
     activationResolutions: activationResolutionObject(),

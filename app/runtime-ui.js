@@ -43,6 +43,22 @@ function serviceHealthLabel(service) {
   return '';
 }
 
+function serviceHostFabricPosture(service) {
+  const source = service?.hostFabric && typeof service.hostFabric === 'object' ? service.hostFabric : null;
+  if (!source) return null;
+  const state = text(source.state || source.fulfillmentPlan?.state || source.lifecyclePlan?.state);
+  const blockedReasons = normalizeArray(source.blockedReasons).map(text).filter(Boolean);
+  return {
+    state,
+    blockedReasons,
+    label: [
+      state ? `fabric ${state}` : '',
+      blockedReasons.length ? `blocked ${blockedReasons.slice(0, 2).join(', ')}` : '',
+      text(source.associationHandoffRef) ? `handoff ${shortId(source.associationHandoffRef)}` : '',
+    ].filter(Boolean).join(' / '),
+  };
+}
+
 export function preparedRuntimeServiceCatalog(snapshot = {}) {
   const registry = preparedServiceRegistry(snapshot);
   return normalizeArray(registry.services)
@@ -57,6 +73,7 @@ export function preparedRuntimeServiceCatalog(snapshot = {}) {
         .filter((node) => node.path || node.label);
       const servicePk = text(service.servicePk || service.service_pk);
       const hostGatewayPk = text(service.hostGatewayPk || service.host_gateway_pk);
+      const hostFabric = serviceHostFabricPosture(service);
       return {
         service: text(service.service).toLowerCase(),
         servicePk,
@@ -66,6 +83,7 @@ export function preparedRuntimeServiceCatalog(snapshot = {}) {
         summary: text(service.summary || service.surface?.summary),
         surfaceChannel: text(service.surfaceChannel || service.surface_channel),
         location: text(service.location),
+        hostFabric,
         nodes,
       };
     })
@@ -195,6 +213,7 @@ export function renderRuntimeSnapshotView(elements, snapshot = {}, documentRef =
           service.hostGatewayPk ? `gateway ${shortId(service.hostGatewayPk)}` : '',
         ].filter(Boolean).join(' / ');
         if (idLine) appendTextLine(documentRef, item, 'itemMeta', idLine);
+        if (service.hostFabric?.label) appendTextLine(documentRef, item, 'itemMeta', service.hostFabric.label);
         if (service.summary) appendTextLine(documentRef, item, 'itemMeta', service.summary);
         if (service.nodes.length > 0) {
           appendTextLine(documentRef, item, 'itemMeta', `Nodes: ${service.nodes.map((node) => node.label || node.path).join(', ')}`);

@@ -89,6 +89,11 @@ test('runtime service catalog view renders retained snapshot services', () => {
             summary: 'Event projection retained.',
             health: { state: 'ready' },
             surfaceChannel: 'service.logging.surface',
+            hostFabric: {
+              state: 'ready',
+              associationHandoffRef: 'handoff:gateway:abcdef012345:initial-owner',
+              blockedReasons: [],
+            },
             nodes: [
               { path: 'events', label: 'Events', capabilities: ['projection.observe'] },
               { path: 'health', label: 'Health', capabilities: ['projection.observe'] },
@@ -115,6 +120,8 @@ test('runtime service catalog view renders retained snapshot services', () => {
   assert.equal(view.serviceRegistry.claimCount, 1);
   assert.equal(elements.catalogStatusEl.textContent, '1 service');
   assert.match(elements.catalogListEl.textContent, /Logging - ready/);
+  assert.match(elements.catalogListEl.textContent, /fabric ready/);
+  assert.match(elements.catalogListEl.textContent, /handoff handoff:ga\.\.\.wner/);
   assert.match(elements.catalogListEl.textContent, /Nodes: Events, Health/);
 });
 

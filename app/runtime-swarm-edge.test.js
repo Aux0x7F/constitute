@@ -129,7 +129,7 @@ function loadRuntime(store = new Map(), options = {}) {
     });
   }
   const source = `${shellStateSource}\n${raw
-    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertConsumerFloor, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertResolvedMemberRef, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
+    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, FABRIC, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertConsumerFloor, assertContractTarget, assertContractTargetRegistryPosture, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertHostFabricFulfillmentPlan, assertHostFabricMemberContribution, assertLifecyclePlanPosture, assertResolvedMemberRef, assertSubstrateAssociationHandoff, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
     .replace(/^import \{ deriveRuntimeShellState \} from "\.\/runtime-shell-state\.js";\s*/m, '')}`;
   const runtimeTimers = makeRuntimeTimers();
   const webSockets = [];
@@ -198,6 +198,112 @@ async function attach(port) {
   return await waitFor(() => port.messages.find((entry) => entry.type === 'runtime.attached'));
 }
 
+function gatewayAssociationPosture(now, gatewayPk) {
+  const shortGatewayPk = gatewayPk.slice(0, 12);
+  const fabricRef = `fabric:gateway:${shortGatewayPk}`;
+  const hostRef = `host:gateway:${shortGatewayPk}`;
+  const associationRef = `association:gateway:${shortGatewayPk}:ongoing`;
+  const handoffId = `handoff:gateway:${shortGatewayPk}:initial-owner`;
+  const contributionId = `fabric-contribution:gateway-association:${shortGatewayPk}`;
+  const lifecyclePlanId = `lifecycle-plan:gateway-association:${shortGatewayPk}`;
+  return {
+    substrateAssociationHandoff: {
+      kind: protocol.SWARM.RECORD_KIND.SUBSTRATE_ASSOCIATION_HANDOFF,
+      handoffId,
+      substrateRef: 'substrate:first-trust:gateway',
+      hostRef,
+      ownerRef: 'identity-1',
+      fabricRef,
+      state: protocol.FABRIC.ASSOCIATION_HANDOFF_STATE.HANDED_OFF,
+      initialAssociationRefs: [`association:substrate:identity-1:${shortGatewayPk}`],
+      gatewayAssociationRefs: [associationRef],
+      evidenceRefs: [`evidence:gateway-association:${gatewayPk}`],
+      blockedReasons: [],
+      safeFacts: { handoff: 'substrate-to-gateway-association', role: 'gateway' },
+      issuedAt: now - 1,
+      handedOffAt: now,
+      expiresAt: now + 90_000,
+    },
+    gatewayAssociationContribution: {
+      kind: protocol.SWARM.RECORD_KIND.HOST_FABRIC_MEMBER_CONTRIBUTION,
+      contributionId,
+      fabricRef,
+      hostRef,
+      memberRef: gatewayPk,
+      role: protocol.FABRIC.MEMBER_ROLE.GATEWAY_ASSOCIATION,
+      state: protocol.FABRIC.MEMBER_CONTRIBUTION_STATE.RUNNING,
+      contractRef: 'contract:gateway-association@0.1.0',
+      subjectRef: associationRef,
+      capabilityRefs: ['gateway.association.fulfill'],
+      grantRefs: ['grant:gateway-association:identity-1'],
+      inputRefs: [handoffId],
+      outputRefs: [`projection:gateway-association:${gatewayPk}`],
+      evidenceRefs: [`evidence:gateway-presence:${gatewayPk}`],
+      lifecyclePlanRefs: [lifecyclePlanId],
+      releaseRefs: ['release:gateway:latest'],
+      blockedReasons: [],
+      safeFacts: { role: protocol.FABRIC.MEMBER_ROLE.GATEWAY_ASSOCIATION },
+      observedAt: now,
+      expiresAt: now + 90_000,
+    },
+    lifecyclePlan: {
+      kind: protocol.SWARM.RECORD_KIND.LIFECYCLE_PLAN_POSTURE,
+      lifecyclePlanId,
+      subjectRef: associationRef,
+      contractRef: 'contract:lifecycle.gateway-association@0.1.0',
+      state: protocol.FABRIC.LIFECYCLE_PLAN_STATE.READY,
+      lifecycleContractRefs: ['contract:lifecycle.gateway-association@0.1.0'],
+      phasePostures: [
+        {
+          phase: protocol.FABRIC.LIFECYCLE_PHASE.SOURCE,
+          state: protocol.FABRIC.LIFECYCLE_PHASE_STATE.READY,
+          evidenceRefs: [`evidence:gateway-source:${gatewayPk}`],
+          outputRefs: ['source:gateway:latest'],
+          blockedReasons: [],
+        },
+        {
+          phase: protocol.FABRIC.LIFECYCLE_PHASE.RUN,
+          state: protocol.FABRIC.LIFECYCLE_PHASE_STATE.RUNNING,
+          evidenceRefs: [`evidence:gateway-running:${gatewayPk}`],
+          outputRefs: [associationRef],
+          blockedReasons: [],
+        },
+        {
+          phase: protocol.FABRIC.LIFECYCLE_PHASE.OBSERVE,
+          state: protocol.FABRIC.LIFECYCLE_PHASE_STATE.READY,
+          evidenceRefs: [`evidence:gateway-observed:${gatewayPk}`],
+          outputRefs: ['projection:gateway-association:hot'],
+          blockedReasons: [],
+        },
+      ],
+      memberContributionRefs: [contributionId],
+      evidenceRefs: [`evidence:lifecycle:gateway-association:${gatewayPk}`],
+      releaseRefs: ['release:gateway:latest'],
+      blockedReasons: [],
+      observedAt: now,
+      expiresAt: now + 90_000,
+    },
+    fulfillmentPlan: {
+      kind: protocol.SWARM.RECORD_KIND.HOST_FABRIC_FULFILLMENT_PLAN,
+      planId: `fabric-plan:gateway-association:${shortGatewayPk}`,
+      fabricRef,
+      hostRef,
+      contractRef: 'contract:gateway-association@0.1.0',
+      state: protocol.FABRIC.FULFILLMENT_PLAN_STATE.READY,
+      requiredRoleRefs: [`role:${protocol.FABRIC.MEMBER_ROLE.GATEWAY_ASSOCIATION}`],
+      memberContributionRefs: [contributionId],
+      missingRoleRefs: [],
+      lifecyclePlanRefs: [lifecyclePlanId],
+      materializationBudgetRefs: ['materialization-budget:gateway-association'],
+      associationHandoffRef: handoffId,
+      evidenceRefs: [`evidence:fabric-plan:${gatewayPk}`],
+      blockedReasons: [],
+      observedAt: now,
+      expiresAt: now + 90_000,
+    },
+  };
+}
+
 async function seedNvrServiceCatalog(port, options = {}) {
   const now = Date.now();
   const gatewayPk = protocol.pubkeyFromSecretKey(GATEWAY_SK);
@@ -214,6 +320,7 @@ async function seedNvrServiceCatalog(port, options = {}) {
           service: 'gateway',
           identityId: 'identity-1',
           updatedAt: now,
+          ...(options.skipGatewayAssociationPosture ? {} : { gatewayAssociationPosture: gatewayAssociationPosture(now, gatewayPk) }),
           hostedServices: [
             {
               devicePk: 'nvr:devgateway',
@@ -3784,6 +3891,87 @@ test('runtime service catalog exposes service registry materialization posture',
   assert.equal(catalog.result.registry.claimRefs.length, 1);
   assert.equal(catalog.result.registry.serviceRefs[0], `service:nvr:${SERVICE_PK}`);
   assert.equal(Array.isArray(catalog.result.registry.entries), true);
+  assert.equal(catalog.result.services[0].hostFabric.state, protocol.FABRIC.FULFILLMENT_PLAN_STATE.READY);
+  assert.equal(catalog.result.services[0].hostFabric.associationHandoffRef.startsWith('handoff:gateway:'), true);
+  assert.equal(catalog.result.services[0].hostFabric.gatewayAssociationContribution.role, protocol.FABRIC.MEMBER_ROLE.GATEWAY_ASSOCIATION);
+  assert.equal(catalog.result.registry.services[0].hostFabric.state, protocol.FABRIC.FULFILLMENT_PLAN_STATE.READY);
+});
+
+test('runtime snapshot exposes selected target source and fabric records', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+  await seedNvrEdgeDirectory(runtime.port);
+
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  assert.equal(snapshot.ok, true);
+  assert.equal(snapshot.result.targetSource.kind, 'runtime.contract-target.source');
+  assert.equal(snapshot.result.contractTargets.length, 1);
+  assert.equal(snapshot.result.targetRegistryPostures.length, 1);
+  assert.equal(snapshot.result.hostFabricFulfillmentPlans.length >= 1, true);
+  assert.equal(snapshot.result.hostFabricContributions.length >= 1, true);
+  assert.equal(snapshot.result.lifecyclePlans.length >= 1, true);
+  const target = protocol.assertContractTarget(snapshot.result.contractTargets[0]);
+  const registry = protocol.assertContractTargetRegistryPosture(snapshot.result.targetRegistryPostures[0]);
+  assert.equal(target.targetRef, 'contract-target:desktop-windows-dev:msa-transition');
+  assert.equal(target.state, protocol.FABRIC.CONTRACT_TARGET_STATE.READY);
+  assert.equal(target.negativeSlotRefs.includes('slot:native-client'), true);
+  assert.equal(target.missingSlotRefs.includes('slot:native-client'), false);
+  assert.equal(registry.state, protocol.FABRIC.CONTRACT_TARGET_REGISTRY_STATE.READY);
+  assert.equal(
+    registry.slotPostures.some((slot) => (
+      slot.slotRef === 'slot:gateway'
+      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+    )),
+    true,
+  );
+  assert.equal(
+    registry.slotPostures.some((slot) => (
+      slot.slotRef === 'slot:native-client'
+      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.NOT_REQUIRED
+    )),
+    true,
+  );
+  assert.equal(
+    registry.slotPostures.some((slot) => (
+      slot.slotRef === 'slot:browser-webrtc'
+      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+      && slot.selectedFulfillmentRef === 'fulfillment:browser-webrtc:authenticated-desktop-browser'
+    )),
+    true,
+  );
+});
+
+test('runtime service catalog labels retained hosted-service fallback posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+
+  await send(runtime.port, {
+    type: 'managedAppliances.sourceSnapshot.put',
+    sourceSnapshot: {
+      identityDevices: [{ pk: BROWSER_PK, identityId: 'identity-1', label: 'Aux' }],
+      swarmDevices: [
+        {
+          devicePk: GATEWAY_PK,
+          deviceLabel: 'DevGateway',
+          role: 'gateway',
+          service: 'gateway',
+          identityId: 'identity-1',
+          updatedAt: Date.now() - 60_000,
+          gatewayAssociationPosture: gatewayAssociationPosture(Date.now(), GATEWAY_PK),
+          hostedServices: [],
+        },
+      ],
+      grantedRecords: [],
+    },
+  });
+
+  const catalog = await send(runtime.port, { type: 'service.catalog.get' });
+  assert.equal(catalog.ok, true);
+  assert.equal(catalog.result.services[0].legacyPathFallback.state, 'legacyPathFallback');
+  assert.match(catalog.result.services[0].legacyPathFallback.reason, /retained hosted-service cache/);
+  assert.equal(catalog.result.registry.services[0].legacyPathFallback.state, 'legacyPathFallback');
 });
 
 test('runtime stream activation resolves NVR source ids through service contract baseline', async () => {
