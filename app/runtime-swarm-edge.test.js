@@ -129,7 +129,7 @@ function loadRuntime(store = new Map(), options = {}) {
     });
   }
   const source = `${shellStateSource}\n${raw
-    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, FABRIC, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertConsumerFloor, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertHostFabricFulfillmentPlan, assertHostFabricMemberContribution, assertLifecyclePlanPosture, assertResolvedMemberRef, assertSubstrateAssociationHandoff, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
+    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, FABRIC, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertConsumerFloor, assertContractTarget, assertContractTargetRegistryPosture, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertHostFabricFulfillmentPlan, assertHostFabricMemberContribution, assertLifecyclePlanPosture, assertResolvedMemberRef, assertSubstrateAssociationHandoff, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
     .replace(/^import \{ deriveRuntimeShellState \} from "\.\/runtime-shell-state\.js";\s*/m, '')}`;
   const runtimeTimers = makeRuntimeTimers();
   const webSockets = [];
@@ -3895,6 +3895,42 @@ test('runtime service catalog exposes service registry materialization posture',
   assert.equal(catalog.result.services[0].hostFabric.associationHandoffRef.startsWith('handoff:gateway:'), true);
   assert.equal(catalog.result.services[0].hostFabric.gatewayAssociationContribution.role, protocol.FABRIC.MEMBER_ROLE.GATEWAY_ASSOCIATION);
   assert.equal(catalog.result.registry.services[0].hostFabric.state, protocol.FABRIC.FULFILLMENT_PLAN_STATE.READY);
+});
+
+test('runtime snapshot exposes selected target source and fabric records', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+  await seedNvrEdgeDirectory(runtime.port);
+
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  assert.equal(snapshot.ok, true);
+  assert.equal(snapshot.result.targetSource.kind, 'runtime.contract-target.source');
+  assert.equal(snapshot.result.contractTargets.length, 1);
+  assert.equal(snapshot.result.targetRegistryPostures.length, 1);
+  assert.equal(snapshot.result.hostFabricFulfillmentPlans.length >= 1, true);
+  assert.equal(snapshot.result.hostFabricContributions.length >= 1, true);
+  assert.equal(snapshot.result.lifecyclePlans.length >= 1, true);
+  const target = protocol.assertContractTarget(snapshot.result.contractTargets[0]);
+  const registry = protocol.assertContractTargetRegistryPosture(snapshot.result.targetRegistryPostures[0]);
+  assert.equal(target.targetRef, 'contract-target:desktop-windows-dev:msa-transition');
+  assert.equal(target.state, protocol.FABRIC.CONTRACT_TARGET_STATE.DEGRADED);
+  assert.equal(target.missingSlotRefs.includes('slot:native-client'), true);
+  assert.equal(registry.state, protocol.FABRIC.CONTRACT_TARGET_REGISTRY_STATE.DEGRADED);
+  assert.equal(
+    registry.slotPostures.some((slot) => (
+      slot.slotRef === 'slot:gateway-association'
+      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+    )),
+    true,
+  );
+  assert.equal(
+    registry.slotPostures.some((slot) => (
+      slot.slotRef === 'slot:native-client'
+      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.MISSING
+    )),
+    true,
+  );
 });
 
 test('runtime service catalog labels retained hosted-service fallback posture', async () => {
