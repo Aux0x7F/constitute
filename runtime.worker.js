@@ -1,5 +1,6 @@
 import {
   AGREEMENT,
+  FABRIC,
   PROJECTION,
   SERVICE_REGISTRY,
   SWARM,
@@ -25,7 +26,11 @@ import {
   assertProjectionSnapshot,
   assertServiceRegistryClaim,
   assertServiceRegistryMaterialization,
+  assertHostFabricFulfillmentPlan,
+  assertHostFabricMemberContribution,
+  assertLifecyclePlanPosture,
   assertResolvedMemberRef,
+  assertSubstrateAssociationHandoff,
   assertProjectionRepairPosture,
   assertResourcePosture,
   assertResourceProfile,
@@ -7679,6 +7684,69 @@ function serviceRecordHealth(record) {
   return safeClone(health);
 }
 
+function serviceRecordGatewayAssociationPosture(record) {
+  const posture = record?.gatewayAssociationPosture || record?.gateway_association_posture;
+  return posture && typeof posture === 'object' ? posture : null;
+}
+
+function serviceRecordHostFabricPosture(record) {
+  const posture = serviceRecordGatewayAssociationPosture(record);
+  if (!posture) return null;
+  try {
+    const substrateAssociationHandoff = assertSubstrateAssociationHandoff(safeClone(
+      posture.substrateAssociationHandoff || posture.substrate_association_handoff,
+    ));
+    const gatewayAssociationContribution = assertHostFabricMemberContribution(safeClone(
+      posture.gatewayAssociationContribution || posture.gateway_association_contribution,
+    ));
+    const lifecyclePlan = assertLifecyclePlanPosture(safeClone(
+      posture.lifecyclePlan || posture.lifecycle_plan,
+    ));
+    const fulfillmentPlan = assertHostFabricFulfillmentPlan(safeClone(
+      posture.fulfillmentPlan || posture.fulfillment_plan,
+    ));
+    const blockedReasons = uniqueTrimmedStrings([
+      ...normalizeArray(substrateAssociationHandoff.blockedReasons),
+      ...normalizeArray(gatewayAssociationContribution.blockedReasons),
+      ...normalizeArray(lifecyclePlan.blockedReasons),
+      ...normalizeArray(fulfillmentPlan.blockedReasons),
+      ...normalizeArray(fulfillmentPlan.missingRoleRefs).map((ref) => `missing:${ref}`),
+    ]);
+    const evidenceRefs = uniqueTrimmedStrings([
+      ...normalizeArray(substrateAssociationHandoff.evidenceRefs),
+      ...normalizeArray(gatewayAssociationContribution.evidenceRefs),
+      ...normalizeArray(lifecyclePlan.evidenceRefs),
+      ...normalizeArray(fulfillmentPlan.evidenceRefs),
+    ]);
+    return {
+      state: fulfillmentPlan.state || lifecyclePlan.state || gatewayAssociationContribution.state,
+      fabricRef: fulfillmentPlan.fabricRef || gatewayAssociationContribution.fabricRef || substrateAssociationHandoff.fabricRef,
+      hostRef: fulfillmentPlan.hostRef || gatewayAssociationContribution.hostRef || substrateAssociationHandoff.hostRef,
+      associationHandoffRef: fulfillmentPlan.associationHandoffRef || substrateAssociationHandoff.handoffId,
+      gatewayAssociationRefs: normalizeArray(substrateAssociationHandoff.gatewayAssociationRefs),
+      memberContributionRefs: normalizeArray(fulfillmentPlan.memberContributionRefs),
+      lifecyclePlanRefs: normalizeArray(fulfillmentPlan.lifecyclePlanRefs),
+      requiredRoleRefs: normalizeArray(fulfillmentPlan.requiredRoleRefs),
+      missingRoleRefs: normalizeArray(fulfillmentPlan.missingRoleRefs),
+      blockedReasons,
+      evidenceRefs,
+      substrateAssociationHandoff,
+      gatewayAssociationContribution,
+      lifecyclePlan,
+      fulfillmentPlan,
+    };
+  } catch (error) {
+    recordRuntimeEvent('runtime.msa.gateway_association.ignored', {
+      level: 'warn',
+      service: serviceRecordService(record),
+      servicePk: serviceRecordServicePk(record),
+      hostGatewayPk: serviceRecordHostGatewayPk(record),
+      error: { message: String(error?.message || error) },
+    });
+    return null;
+  }
+}
+
 function normalizeServiceZoneScope(value) {
   if (!value) return null;
   const source = value && typeof value === 'object' ? value : { zoneId: value };
@@ -7832,6 +7900,9 @@ function hostedServiceRecords() {
           hostGatewayLabel: hosted.hostGatewayLabel || hostGatewayLabel,
           identityId: serviceRecordIdentityId(hosted) || serviceRecordIdentityId(record) || undefined,
           zoneScope: serviceRecordZoneScope(hosted) || hostGatewayZoneScope || undefined,
+          gatewayAssociationPosture: serviceRecordGatewayAssociationPosture(hosted)
+            || serviceRecordGatewayAssociationPosture(record)
+            || undefined,
         };
         const service = serviceRecordService(merged);
         const servicePk = serviceRecordServicePk(merged);
@@ -7861,6 +7932,7 @@ function serviceDescriptorFromRecord(record) {
     surfaceChannel,
     summary: serviceRecordSummary(record),
     health: serviceRecordHealth(record),
+    hostFabric: serviceRecordHostFabricPosture(record),
     nodes: serviceRecordNodes(record),
   };
 }
@@ -7903,8 +7975,16 @@ function serviceRegistryClaimFromDescriptor(descriptor, issuedAt = nowMs()) {
       evidenceRefs: uniqueTrimmedStrings([
         descriptor.liveEdgeRoute?.memberRef ? `swarm.directory:${descriptor.liveEdgeRoute.memberRef}` : '',
         descriptor.surfaceChannel ? `projection:${descriptor.surfaceChannel}` : '',
+        descriptor.hostFabric?.associationHandoffRef,
+        ...normalizeArray(descriptor.hostFabric?.memberContributionRefs),
+        ...normalizeArray(descriptor.hostFabric?.lifecyclePlanRefs),
+        ...normalizeArray(descriptor.hostFabric?.evidenceRefs),
       ]),
-      safeFacts: { service, surfaceChannel: descriptor.surfaceChannel || '' },
+      safeFacts: {
+        service,
+        surfaceChannel: descriptor.surfaceChannel || '',
+        hostFabricState: descriptor.hostFabric?.state || '',
+      },
       issuedAt,
       expiresAt: issuedAt + 90_000,
     });
@@ -9181,6 +9261,10 @@ function mergeGatewayHostedServiceRecord(actualRecord, hostedRecord, gatewayReco
     hostGatewayPk: gatewayPk,
     serviceVersion: String(hosted.serviceVersion || hosted.service_version || actual.serviceVersion || actual.service_version || '').trim(),
     swarmEdge: hosted.swarmEdge || hosted.swarm_edge || actual.swarmEdge || actual.swarm_edge || undefined,
+    gatewayAssociationPosture: serviceRecordGatewayAssociationPosture(hosted)
+      || serviceRecordGatewayAssociationPosture(actual)
+      || serviceRecordGatewayAssociationPosture(gateway)
+      || undefined,
     updatedAt: hostedUpdatedAt,
     freshnessMs: Number(hosted.freshnessMs || hosted.freshness_ms || actual.freshnessMs || actual.freshness_ms || 0),
     status: String(hosted.status || actual.status || '').trim(),
