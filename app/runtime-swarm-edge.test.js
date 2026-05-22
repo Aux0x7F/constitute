@@ -3897,6 +3897,38 @@ test('runtime service catalog exposes service registry materialization posture',
   assert.equal(catalog.result.registry.services[0].hostFabric.state, protocol.FABRIC.FULFILLMENT_PLAN_STATE.READY);
 });
 
+test('runtime service catalog labels retained hosted-service fallback posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+
+  await send(runtime.port, {
+    type: 'managedAppliances.sourceSnapshot.put',
+    sourceSnapshot: {
+      identityDevices: [{ pk: BROWSER_PK, identityId: 'identity-1', label: 'Aux' }],
+      swarmDevices: [
+        {
+          devicePk: GATEWAY_PK,
+          deviceLabel: 'DevGateway',
+          role: 'gateway',
+          service: 'gateway',
+          identityId: 'identity-1',
+          updatedAt: Date.now() - 60_000,
+          gatewayAssociationPosture: gatewayAssociationPosture(Date.now(), GATEWAY_PK),
+          hostedServices: [],
+        },
+      ],
+      grantedRecords: [],
+    },
+  });
+
+  const catalog = await send(runtime.port, { type: 'service.catalog.get' });
+  assert.equal(catalog.ok, true);
+  assert.equal(catalog.result.services[0].legacyPathFallback.state, 'legacyPathFallback');
+  assert.match(catalog.result.services[0].legacyPathFallback.reason, /retained hosted-service cache/);
+  assert.equal(catalog.result.registry.services[0].legacyPathFallback.state, 'legacyPathFallback');
+});
+
 test('runtime stream activation resolves NVR source ids through service contract baseline', async () => {
   const runtime = loadRuntime(new Map());
   await attach(runtime.port);

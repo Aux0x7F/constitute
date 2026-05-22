@@ -7684,6 +7684,11 @@ function serviceRecordHealth(record) {
   return safeClone(health);
 }
 
+function serviceRecordLegacyPathFallback(record) {
+  const fallback = record?.legacyPathFallback || record?.legacy_path_fallback;
+  return fallback && typeof fallback === 'object' ? safeClone(fallback) : null;
+}
+
 function serviceRecordGatewayAssociationPosture(record) {
   const posture = record?.gatewayAssociationPosture || record?.gateway_association_posture;
   return posture && typeof posture === 'object' ? posture : null;
@@ -7933,6 +7938,7 @@ function serviceDescriptorFromRecord(record) {
     summary: serviceRecordSummary(record),
     health: serviceRecordHealth(record),
     hostFabric: serviceRecordHostFabricPosture(record),
+    legacyPathFallback: serviceRecordLegacyPathFallback(record),
     nodes: serviceRecordNodes(record),
   };
 }
@@ -7984,6 +7990,7 @@ function serviceRegistryClaimFromDescriptor(descriptor, issuedAt = nowMs()) {
         service,
         surfaceChannel: descriptor.surfaceChannel || '',
         hostFabricState: descriptor.hostFabric?.state || '',
+        legacyPathFallbackState: descriptor.legacyPathFallback?.state || '',
       },
       issuedAt,
       expiresAt: issuedAt + 90_000,
@@ -8102,6 +8109,7 @@ function serviceCatalog() {
       ...descriptor,
       summary: String(surface?.summary || descriptor.summary || '').trim(),
       health: surface?.health && typeof surface.health === 'object' ? safeClone(surface.health) : descriptor.health,
+      legacyPathFallback: descriptor.legacyPathFallback || null,
       healthNode: String(surface?.healthNode || '').trim(),
       nodes: Array.isArray(surface?.nodes)
         ? surface.nodes.map((node) => ({
@@ -9168,7 +9176,17 @@ function applyGatewayHostedSnapshot(record) {
   } else if (cached && Array.isArray(cached.hostedServices) && cached.hostedServices.length > 0) {
     const cachedUpdatedAt = Number(cached.updatedAt || 0);
     if (cachedUpdatedAt >= current.updatedAt) {
-      effectiveHostedServices = cached.hostedServices;
+      effectiveHostedServices = cached.hostedServices.map((service) => ({
+        ...service,
+        legacyPathFallback: {
+          state: 'legacyPathFallback',
+          reason: 'gateway hosted service list absent from current snapshot; retained hosted-service cache used',
+          sourceRefs: ['runtime.shared.state.hostedGatewaySnapshots'],
+          observedAt: nowMs(),
+          currentSnapshotUpdatedAt: current.updatedAt || 0,
+          cachedSnapshotUpdatedAt: cachedUpdatedAt,
+        },
+      }));
     } else if (current.updatedAt >= cachedUpdatedAt) {
       cache[current.pk] = {
         updatedAt: current.updatedAt,
