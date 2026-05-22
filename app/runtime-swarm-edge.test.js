@@ -3914,12 +3914,13 @@ test('runtime snapshot exposes selected target source and fabric records', async
   const target = protocol.assertContractTarget(snapshot.result.contractTargets[0]);
   const registry = protocol.assertContractTargetRegistryPosture(snapshot.result.targetRegistryPostures[0]);
   assert.equal(target.targetRef, 'contract-target:desktop-windows-dev:msa-transition');
-  assert.equal(target.state, protocol.FABRIC.CONTRACT_TARGET_STATE.DEGRADED);
-  assert.equal(target.missingSlotRefs.includes('slot:native-client'), true);
-  assert.equal(registry.state, protocol.FABRIC.CONTRACT_TARGET_REGISTRY_STATE.DEGRADED);
+  assert.equal(target.state, protocol.FABRIC.CONTRACT_TARGET_STATE.READY);
+  assert.equal(target.negativeSlotRefs.includes('slot:native-client'), true);
+  assert.equal(target.missingSlotRefs.includes('slot:native-client'), false);
+  assert.equal(registry.state, protocol.FABRIC.CONTRACT_TARGET_REGISTRY_STATE.READY);
   assert.equal(
     registry.slotPostures.some((slot) => (
-      slot.slotRef === 'slot:gateway-association'
+      slot.slotRef === 'slot:gateway'
       && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
     )),
     true,
@@ -3927,7 +3928,15 @@ test('runtime snapshot exposes selected target source and fabric records', async
   assert.equal(
     registry.slotPostures.some((slot) => (
       slot.slotRef === 'slot:native-client'
-      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.MISSING
+      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.NOT_REQUIRED
+    )),
+    true,
+  );
+  assert.equal(
+    registry.slotPostures.some((slot) => (
+      slot.slotRef === 'slot:browser-webrtc'
+      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+      && slot.selectedFulfillmentRef === 'fulfillment:browser-webrtc:authenticated-desktop-browser'
     )),
     true,
   );

@@ -8218,6 +8218,28 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
   const fabricRecords = runtimeHostFabricRecordsFromCatalog(catalog);
   const serviceRefs = uniqueTrimmedStrings(services.map((service) => service?.serviceRef));
   const serviceFulfillmentRefs = serviceRefs.map((ref) => `fulfillment:${ref}`);
+  const serviceSlots = services
+    .map((service) => {
+      const serviceName = String(service?.service || '').trim().toLowerCase();
+      const serviceRef = String(service?.serviceRef || '').trim();
+      if (!serviceName || !serviceRef) return null;
+      return targetSlot(
+        `slot:${serviceName}-service`,
+        FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
+        FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
+        [`fulfillment:${serviceRef}`],
+        {
+          sourceRefs: ['projection:swarm.directory', 'projection:retained.services'],
+          evidenceRefs: uniqueTrimmedStrings([
+            `evidence:service-catalog:${serviceName}`,
+            service?.hostFabric?.associationHandoffRef,
+            ...normalizeArray(service?.hostFabric?.evidenceRefs),
+          ]),
+          safeFacts: { service: serviceName },
+        },
+      );
+    })
+    .filter(Boolean);
   const gatewayFulfillmentRefs = uniqueTrimmedStrings(
     fabricRecords.memberContributions
       .filter((contribution) => contribution.role === FABRIC.MEMBER_ROLE.GATEWAY_ASSOCIATION)
@@ -8226,8 +8248,24 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
   const runtimeRef = `runtime:${RUNTIME_WORKER_BUILD_ID}`;
   const targetRef = 'contract-target:desktop-windows-dev:msa-transition';
   const registryRef = 'contract-target-registry:desktop-windows-dev:msa-transition';
-  const missingSlotRefs = ['slot:native-client'];
+  const negativeSlotRefs = ['slot:native-client'];
+  const missingSlotRefs = [];
   const slotPostures = [
+    targetSlot(
+      'slot:gateway',
+      gatewayFulfillmentRefs.length
+        ? FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+        : FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED,
+      gatewayFulfillmentRefs.length
+        ? FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE
+        : FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.DEGRADED,
+      gatewayFulfillmentRefs,
+      {
+        adapterRefs: ['adapter:gateway-association'],
+        evidenceRefs: fabricRecords.memberContributions.flatMap((contribution) => normalizeArray(contribution.evidenceRefs)),
+        blockedReasons: gatewayFulfillmentRefs.length ? [] : ['gatewayAssociationContributionMissing'],
+      },
+    ),
     targetSlot(
       'slot:runtime',
       FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
@@ -8240,6 +8278,17 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
       },
     ),
     targetSlot(
+      'slot:service-manager',
+      FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
+      FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
+      ['fulfillment:service-manager:local-dev'],
+      {
+        platformRefs: ['platform:windows.desktop'],
+        adapterRefs: ['adapter:host-service:windows'],
+        evidenceRefs: ['evidence:service-manager:target-reducer'],
+      },
+    ),
+    targetSlot(
       'slot:surface',
       FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
       FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
@@ -8248,20 +8297,6 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
         platformRefs: ['platform:browser-window'],
         adapterRefs: ['adapter:runtime-surface-client'],
         evidenceRefs: ['evidence:surface:runtime-attach'],
-      },
-    ),
-    targetSlot(
-      'slot:gateway-association',
-      gatewayFulfillmentRefs.length
-        ? FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
-        : FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED,
-      gatewayFulfillmentRefs.length
-        ? FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE
-        : FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.DEGRADED,
-      gatewayFulfillmentRefs,
-      {
-        evidenceRefs: fabricRecords.memberContributions.flatMap((contribution) => normalizeArray(contribution.evidenceRefs)),
-        blockedReasons: gatewayFulfillmentRefs.length ? [] : ['gatewayAssociationContributionMissing'],
       },
     ),
     targetSlot(
@@ -8279,13 +8314,30 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
         blockedReasons: serviceFulfillmentRefs.length ? [] : ['serviceCatalogEmpty'],
       },
     ),
+    ...serviceSlots,
+    targetSlot(
+      'slot:browser-webrtc',
+      FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
+      FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE,
+      ['fulfillment:browser-webrtc:authenticated-desktop-browser'],
+      {
+        platformRefs: ['platform:browser-window'],
+        adapterRefs: ['adapter:browser-webrtc'],
+        proofRequirementRefs: ['proof-requirement:media-nonzero-dimensions'],
+        evidenceRefs: [
+          'evidence:runtime:media-transport-profile',
+          'evidence:browser-webrtc:adapter-ready',
+        ],
+      },
+    ),
     targetSlot(
       'slot:native-client',
-      FABRIC.CONTRACT_TARGET_SLOT_STATE.MISSING,
+      FABRIC.CONTRACT_TARGET_SLOT_STATE.NOT_REQUIRED,
       FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.UNKNOWN,
       [],
       {
-        blockedReasons: ['nativeClientNotPresentOnDesktopDevTarget'],
+        evidenceRefs: ['evidence:target:native-client:not-required'],
+        safeFacts: { reason: 'browser target' },
       },
     ),
   ];
@@ -8314,7 +8366,13 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
     subbranchRefs: ['subbranch:runtime-target-source'],
     capabilitySlotRefs: slotPostures.map((slot) => slot.slotRef),
     adapterPackRef: 'adapter-pack:browser-runtime-local',
-    adapterRefs: ['adapter:runtime-shared-worker', 'adapter:runtime-surface-client'],
+    adapterRefs: [
+      'adapter:runtime-shared-worker',
+      'adapter:runtime-surface-client',
+      'adapter:browser-webrtc',
+      'adapter:host-service:windows',
+    ],
+    negativeSlotRefs,
     missingSlotRefs,
     degradedSlotRefs,
     proofProfileRefs: ['proof-profile:surface-landscape'],
@@ -8327,6 +8385,7 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
       runtimeBuildId: RUNTIME_WORKER_BUILD_ID,
       source: 'runtime.snapshot',
       serviceCount: services.length,
+      nativeClient: 'notRequired',
     },
     issuedAt: sampledAt,
     expiresAt: sampledAt + 60_000,
@@ -8343,8 +8402,10 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
     candidateFulfillmentRefs: uniqueTrimmedStrings([
       runtimeRef,
       'surface:first-party-browser',
+      'fulfillment:service-manager:local-dev',
       ...gatewayFulfillmentRefs,
       ...serviceFulfillmentRefs,
+      'fulfillment:browser-webrtc:authenticated-desktop-browser',
     ]),
     sourceRefs: ['projection:swarm.directory', 'projection:retained.services'],
     buildRefs: [],
@@ -8357,6 +8418,7 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
       runtimeBuildId: RUNTIME_WORKER_BUILD_ID,
       source: 'runtime.snapshot',
       serviceCount: services.length,
+      nativeClient: 'notRequired',
     },
     observedAt: sampledAt,
     expiresAt: sampledAt + 60_000,
