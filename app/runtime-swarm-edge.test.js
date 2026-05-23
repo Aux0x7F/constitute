@@ -2630,6 +2630,26 @@ test('live swarm edge attach requires resolved member refs and reuses duplicate 
   assert.equal(errorEvent?.safeFacts?.endpointHost, '127.0.0.1');
   assert.equal(errorEvent?.safeFacts?.memberRef, BROWSER_PK);
   assert.equal(closedEvent?.safeFacts?.closeCode, 1006);
+  assert.equal(edgeSnapshot.result.edge.carrierEdge.state, protocol.SWARM.CARRIER_EDGE_SESSION_STATE.RECONNECTING);
+  assert.equal(edgeSnapshot.result.edge.carrierEdge.connectionState, 'backoff');
+  assert.ok(edgeSnapshot.result.edge.carrierEdge.blockedReasons.includes('carrierEdgeBackoff'));
+  assert.equal(edgeSnapshot.result.edge.carrierEdge.retryPosture.attempts, 1);
+
+  const blockedRetry = await send(runtime.port, {
+    type: 'swarm.edge.attach',
+    payload: {
+      swarmEdgeEndpoint: 'ws://127.0.0.1:7447/',
+      memberRef: BROWSER_PK,
+      zoneScope,
+    },
+  });
+  assert.equal(blockedRetry.ok, false);
+  assert.equal(blockedRetry.blockedReason, 'carrierEdgeBackoff');
+  assert.equal(blockedRetry.retryable, true);
+  assert.equal(runtime.webSockets.length, 1);
+  edgeSnapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  const blockedRetryEvent = edgeSnapshot.result.runtimeEvents.find((entry) => entry.kind === 'adapter.edge.attach.blocked' && entry.safeFacts?.blockedReason === 'carrierEdgeBackoff');
+  assert.equal(blockedRetryEvent?.safeFacts?.retryable, true);
 });
 
 test('live swarm edge attach waits for runtime authority when member ref is runtime-owned', async () => {

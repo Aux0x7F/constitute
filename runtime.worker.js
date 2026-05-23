@@ -94,6 +94,9 @@ const SWARM_EDGE_REJECT = 'swarm.edge.reject';
 const CARRIER_EDGE_RUNTIME_ADAPTER_REF = 'adapter:runtime-worker:websocket';
 const CARRIER_EDGE_RUNTIME_SELECTION_REF = 'carrier-edge-selection:runtime:swarm-edge';
 const CARRIER_EDGE_EVIDENCE_TTL_MS = 30_000;
+const CARRIER_EDGE_RETRY_BASE_MS = 1_500;
+const CARRIER_EDGE_RETRY_MAX_MS = 30_000;
+const CARRIER_EDGE_RETRY_RESET_MS = 120_000;
 const CONTRIBUTION_LIFECYCLE_LIMIT = 100;
 const RUNTIME_DIAGNOSTICS_SUBSCRIBE = 'runtime.diagnostics.subscribe';
 const RUNTIME_DIAGNOSTICS_UNSUBSCRIBE = 'runtime.diagnostics.unsubscribe';
@@ -502,6 +505,22 @@ const swarmEdge = {
   repairRequests: [],
   routeObservations: [],
   contributionLifecycles: [],
+  retryPosture: {
+    state: 'idle',
+    attempts: 0,
+    delayMs: 0,
+    nextRetryAt: 0,
+    lastFailureAt: 0,
+    lastFailureReason: '',
+    targetRef: '',
+    resetAfter: 0,
+  },
+  releasePosture: {
+    state: 'released',
+    releasedAt: 0,
+    closedAt: 0,
+    reason: 'initial',
+  },
 };
 let liveSwarmEdgeAttachInFlight = null;
 let liveSwarmEdgeAttachInFlightTarget = '';
@@ -3086,6 +3105,8 @@ function edgeSnapshot() {
     contributionLifecycles: swarmEdge.contributionLifecycles.map((entry) => safeClone(entry)),
     carrierEdge,
     carrierEdgeSessionEvidence: carrierEdge,
+    retryPosture: safeClone(swarmEdge.retryPosture || {}),
+    releasePosture: safeClone(swarmEdge.releasePosture || {}),
   };
 }
 
@@ -5272,6 +5293,13 @@ async function handleEdgeWireMessage(raw) {
   if (type === 'swarm.edge.accept') {
     swarmEdge.sessionId = String(message?.accept?.sessionId || message?.sessionId || '').trim();
     swarmEdge.connected = true;
+    resetCarrierEdgeRetry('accepted');
+    swarmEdge.releasePosture = {
+      state: 'held',
+      releasedAt: 0,
+      closedAt: 0,
+      reason: 'accepted',
+    };
     clearRuntimeControlPlaneBusy();
     const acceptedZoneScope = normalizeServiceZoneScope(message?.accept?.zoneScope || message?.accept?.zone_scope || message?.zoneScope || message?.zone_scope);
     if (acceptedZoneScope) swarmEdge.zoneScope = acceptedZoneScope;
@@ -5317,10 +5345,18 @@ async function handleEdgeWireMessage(raw) {
     return;
   }
   if (type === 'swarm.edge.close') {
+    const retryPosture = recordCarrierEdgeFailure('serviceClose', {
+      endpoint: swarmEdge.endpoint,
+      memberRef: swarmEdge.memberRef,
+      zoneScope: swarmEdge.zoneScope,
+    });
     swarmEdge.connected = false;
     swarmEdge.sessionId = '';
     recordRuntimeEvent('adapter.edge.closed', {
       reasonCode: String(message?.reasonCode || '').trim(),
+      retryAt: retryPosture.nextRetryAt,
+      retryInMs: retryPosture.delayMs,
+      attempts: retryPosture.attempts,
     });
     touchRuntime();
     broadcast({ type: 'swarm.edge.close', reasonCode: String(message?.reasonCode || '').trim() });
@@ -5369,6 +5405,79 @@ function referenceToken(value, fallback = 'unknown') {
   return token || fallback;
 }
 
+function carrierEdgeTargetRef(endpoint, memberRef, zoneScope) {
+  return [
+    referenceToken(endpoint, 'endpoint'),
+    referenceToken(memberRef, 'member'),
+    referenceToken(stableJson(zoneScope || {}), 'zone'),
+  ].join('|');
+}
+
+function carrierEdgeRetryDelayMs(attempts) {
+  const step = Math.max(0, Number(attempts || 1) - 1);
+  const delay = CARRIER_EDGE_RETRY_BASE_MS * (2 ** Math.min(step, 6));
+  return Math.min(CARRIER_EDGE_RETRY_MAX_MS, delay);
+}
+
+function resetCarrierEdgeRetry(reason = 'accepted') {
+  swarmEdge.retryPosture = {
+    state: 'idle',
+    attempts: 0,
+    delayMs: 0,
+    nextRetryAt: 0,
+    lastFailureAt: Number(swarmEdge.retryPosture?.lastFailureAt || 0) || 0,
+    lastFailureReason: String(reason || '').trim(),
+    targetRef: '',
+    resetAfter: 0,
+  };
+}
+
+function recordCarrierEdgeFailure(reason, { endpoint = swarmEdge.endpoint, memberRef = swarmEdge.memberRef, zoneScope = swarmEdge.zoneScope } = {}) {
+  const observedAt = nowMs();
+  const targetRef = carrierEdgeTargetRef(endpoint, memberRef, zoneScope);
+  const previous = swarmEdge.retryPosture && typeof swarmEdge.retryPosture === 'object' ? swarmEdge.retryPosture : {};
+  const sameTarget = String(previous.targetRef || '') === targetRef && Number(previous.resetAfter || 0) > observedAt;
+  const attempts = sameTarget ? Number(previous.attempts || 0) + 1 : 1;
+  const delayMs = carrierEdgeRetryDelayMs(attempts);
+  const nextRetryAt = observedAt + delayMs;
+  swarmEdge.retryPosture = {
+    state: 'backoff',
+    attempts,
+    delayMs,
+    nextRetryAt,
+    lastFailureAt: observedAt,
+    lastFailureReason: String(reason || 'carrierEdgeFailure').trim() || 'carrierEdgeFailure',
+    targetRef,
+    resetAfter: observedAt + CARRIER_EDGE_RETRY_RESET_MS,
+  };
+  swarmEdge.releasePosture = {
+    state: 'released',
+    releasedAt: observedAt,
+    closedAt: observedAt,
+    reason: String(reason || 'carrierEdgeFailure').trim() || 'carrierEdgeFailure',
+  };
+  return safeClone(swarmEdge.retryPosture);
+}
+
+function carrierEdgeBackoffBlock(targetRef) {
+  const retry = swarmEdge.retryPosture && typeof swarmEdge.retryPosture === 'object' ? swarmEdge.retryPosture : {};
+  const now = nowMs();
+  if (
+    String(retry.state || '') === 'backoff'
+    && String(retry.targetRef || '') === targetRef
+    && Number(retry.nextRetryAt || 0) > now
+  ) {
+    return {
+      blocked: true,
+      retryAt: Number(retry.nextRetryAt || 0),
+      retryInMs: Math.max(0, Number(retry.nextRetryAt || 0) - now),
+      attempts: Number(retry.attempts || 0),
+      reason: String(retry.lastFailureReason || 'carrierEdgeBackoff'),
+    };
+  }
+  return { blocked: false };
+}
+
 function socketReadyStateName(socket) {
   const state = Number(socket?.readyState ?? -1);
   if (typeof WebSocket === 'function') {
@@ -5387,6 +5496,9 @@ function socketReadyStateName(socket) {
 function carrierEdgeBackpressureState() {
   const queuedCount = outboundSwarmFrames.size;
   if (queuedCount >= 100) return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.SATURATED;
+  if (carrierEdgeBackoffBlock(String(swarmEdge.retryPosture?.targetRef || '')).blocked) {
+    return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.DEGRADED;
+  }
   if (queuedCount > 0 || swarmEdge.rejections.length > 0 || swarmEdge.repairRequests.length > 0) {
     return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.DEGRADED;
   }
@@ -5399,6 +5511,9 @@ function carrierEdgeSessionState() {
   const readyState = socketReadyStateName(swarmEdge.socket);
   if (readyState === 'connecting') return SWARM.CARRIER_EDGE_SESSION_STATE.OPENING;
   if (readyState === 'closing') return SWARM.CARRIER_EDGE_SESSION_STATE.CLOSING;
+  if (carrierEdgeBackoffBlock(String(swarmEdge.retryPosture?.targetRef || '')).blocked) {
+    return SWARM.CARRIER_EDGE_SESSION_STATE.RECONNECTING;
+  }
   if (swarmEdge.mode === 'live' && swarmEdge.socket) return SWARM.CARRIER_EDGE_SESSION_STATE.RECONNECTING;
   return SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED;
 }
@@ -5415,6 +5530,26 @@ function carrierEdgeSessionEvidenceObject() {
   if (state === SWARM.CARRIER_EDGE_SESSION_STATE.BLOCKED) {
     blockedReasons.push(swarmEdge.mode === 'pendingAuthority' ? 'missingRuntimeAuthorityMemberRef' : 'carrierEdgeBlocked');
   }
+  const retryBlock = carrierEdgeBackoffBlock(String(swarmEdge.retryPosture?.targetRef || ''));
+  if (retryBlock.blocked) blockedReasons.push('carrierEdgeBackoff');
+  const retryPosture = {
+    mode: String(swarmEdge.mode || '').trim() || 'detached',
+    attachInFlight: Boolean(liveSwarmEdgeAttachInFlight),
+    queuedCount: outboundSwarmFrames.size,
+    ...(swarmEdge.retryPosture && typeof swarmEdge.retryPosture === 'object'
+      ? safeClone(swarmEdge.retryPosture)
+      : {}),
+    ...(retryBlock.blocked ? {
+      retryAt: retryBlock.retryAt,
+      retryInMs: retryBlock.retryInMs,
+    } : {}),
+  };
+  const releasePosture = swarmEdge.releasePosture && typeof swarmEdge.releasePosture === 'object'
+    ? safeClone(swarmEdge.releasePosture)
+    : { state: state === SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED ? 'released' : 'held' };
+  if (state !== SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED && releasePosture.state === 'released') {
+    releasePosture.state = 'held';
+  }
   const record = {
     kind: SWARM.RECORD_KIND.CARRIER_EDGE_SESSION_EVIDENCE,
     evidenceId: `carrier-edge-evidence:runtime:${runtimeSessionId}:swarm-edge`,
@@ -5424,16 +5559,10 @@ function carrierEdgeSessionEvidenceObject() {
     adapterKind: SWARM.CARRIER_EDGE_ADAPTER_KIND.WEB_SOCKET,
     participantRef,
     state,
-    connectionState: swarmEdge.connected ? 'connected' : (socketState || 'disconnected'),
+    connectionState: retryBlock.blocked ? 'backoff' : (swarmEdge.connected ? 'connected' : (socketState || 'disconnected')),
     backpressureState: carrierEdgeBackpressureState(),
-    retryPosture: {
-      mode: String(swarmEdge.mode || '').trim() || 'detached',
-      attachInFlight: Boolean(liveSwarmEdgeAttachInFlight),
-      queuedCount: outboundSwarmFrames.size,
-    },
-    releasePosture: {
-      state: state === SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED ? 'released' : 'held',
-    },
+    retryPosture,
+    releasePosture,
     safeFacts: {
       mode: String(swarmEdge.mode || '').trim() || 'detached',
       connected: swarmEdge.connected === true,
@@ -5442,6 +5571,9 @@ function carrierEdgeSessionEvidenceObject() {
       sentCount: swarmEdge.sentFrames.length,
       rejectionCount: swarmEdge.rejections.length,
       repairRequestCount: swarmEdge.repairRequests.length,
+      retryState: String(retryPosture.state || '').trim(),
+      retryInMs: Number(retryPosture.retryInMs || 0) || 0,
+      releaseState: String(releasePosture.state || '').trim(),
     },
     evidenceRefs: [
       `runtime:${RUNTIME_WORKER_BUILD_ID}`,
@@ -5513,6 +5645,36 @@ async function attachLiveSwarmEdge(message) {
   }
   const requestedZoneScope = appIntentZoneScope(source);
   const attachTarget = `${socketEndpoint}|${memberRef}|${stableJson(requestedZoneScope)}`;
+  const retryTargetRef = carrierEdgeTargetRef(socketEndpoint, memberRef, requestedZoneScope);
+  const retryBlock = carrierEdgeBackoffBlock(retryTargetRef);
+  if (retryBlock.blocked) {
+    const blockedReason = 'carrierEdgeBackoff';
+    recordRuntimeEvent('adapter.edge.attach.blocked', {
+      level: 'warn',
+      state: 'reconnecting',
+      blockedReason,
+      retryable: true,
+      retryAt: retryBlock.retryAt,
+      retryInMs: retryBlock.retryInMs,
+      attempts: retryBlock.attempts,
+      failureReason: retryBlock.reason,
+      ...edgeEndpointDiagnosticFacts(socketEndpoint),
+      memberRef,
+      zoneScope: requestedZoneScope,
+    });
+    touchRuntime();
+    broadcastSnapshot();
+    return {
+      ok: false,
+      error: `carrier edge backoff active; retry in ${retryBlock.retryInMs}ms`,
+      state: 'reconnecting',
+      blockedReason,
+      retryable: true,
+      retryAt: retryBlock.retryAt,
+      retryInMs: retryBlock.retryInMs,
+      result: edgeSnapshot(),
+    };
+  }
   if (liveSwarmEdgeAttachInFlight && liveSwarmEdgeAttachInFlightTarget === attachTarget) {
     return await liveSwarmEdgeAttachInFlight;
   }
@@ -5556,6 +5718,12 @@ async function attachLiveSwarmEdgeResolved(source, resolved) {
   swarmEdge.sessionId = '';
   swarmEdge.memberRef = hello.memberRef;
   swarmEdge.zoneScope = safeClone(hello.zoneScope);
+  swarmEdge.releasePosture = {
+    state: 'held',
+    releasedAt: 0,
+    closedAt: 0,
+    reason: 'attach',
+  };
   const socket = new WebSocket(socketEndpoint);
   swarmEdge.socket = socket;
   socket.onopen = () => {
@@ -5578,6 +5746,12 @@ async function attachLiveSwarmEdgeResolved(source, resolved) {
     broadcastSnapshot();
   };
   socket.onclose = (event) => {
+    const closeZoneScope = safeClone(swarmEdge.zoneScope || hello.zoneScope);
+    const retryPosture = recordCarrierEdgeFailure('websocketClosed', {
+      endpoint: socketEndpoint,
+      memberRef: hello.memberRef,
+      zoneScope: closeZoneScope,
+    });
     swarmEdge.connected = false;
     markRuntimeControlPlaneBusy(3000);
     swarmEdge.sessionId = '';
@@ -5591,6 +5765,9 @@ async function attachLiveSwarmEdgeResolved(source, resolved) {
       closeReason: String(event?.reason || '').trim(),
       wasClean: event?.wasClean === true,
       zoneScope: hello.zoneScope,
+      retryAt: retryPosture.nextRetryAt,
+      retryInMs: retryPosture.delayMs,
+      attempts: retryPosture.attempts,
     });
     broadcast({ type: 'swarm.edge.closed', edge: edgeSnapshot() });
     broadcastSnapshot();
@@ -11407,6 +11584,13 @@ async function handleControlMessage(message, endpoint) {
       swarmEdge.sessionId = '';
       swarmEdge.memberRef = '';
       swarmEdge.zoneScope = null;
+      resetCarrierEdgeRetry('manualDisconnect');
+      swarmEdge.releasePosture = {
+        state: 'released',
+        releasedAt: nowMs(),
+        closedAt: nowMs(),
+        reason: 'manualDisconnect',
+      };
       touchRuntime();
       broadcastSnapshot();
       response = {
@@ -11426,6 +11610,13 @@ async function handleControlMessage(message, endpoint) {
       swarmEdge.endpoint = '';
           swarmEdge.sessionId = String(message.sessionId || 'test-session').trim();
           swarmEdge.zoneScope = safeClone(message.zoneScope || message?.payload?.zoneScope || null);
+          resetCarrierEdgeRetry('testConnect');
+          swarmEdge.releasePosture = {
+            state: 'held',
+            releasedAt: 0,
+            closedAt: 0,
+            reason: 'testConnect',
+          };
           sendQueuedSwarmFrames();
           requestRuntimeDirectoryObserve('edge.test.connect');
           void flushPendingRouteIntents('edge.test.connect');
@@ -11442,6 +11633,12 @@ async function handleControlMessage(message, endpoint) {
       swarmEdge.connected = false;
       swarmEdge.sessionId = '';
       swarmEdge.zoneScope = null;
+      swarmEdge.releasePosture = {
+        state: 'released',
+        releasedAt: nowMs(),
+        closedAt: nowMs(),
+        reason: 'testDisconnect',
+      };
       touchRuntime();
       broadcastSnapshot();
       response = {
