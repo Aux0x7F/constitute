@@ -10,7 +10,7 @@
     "test": "node --test app/**/*.test.js"
   },
   "dependencies": {
-    "constitute-protocol": "github:Aux0x7F/constitute-protocol#main",
+    "constitute-protocol": "github:Aux0x7F/constitute-protocol#0x/fabric-transition/topology-execution",
     "constitute-ui": "github:Aux0x7F/constitute-ui#main"
   },
   "devDependencies": {
