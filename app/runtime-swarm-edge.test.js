@@ -129,7 +129,7 @@ function loadRuntime(store = new Map(), options = {}) {
     });
   }
   const source = `${shellStateSource}\n${raw
-    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, FABRIC, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertConsumerFloor, assertContractTarget, assertContractTargetRegistryPosture, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertHostFabricFulfillmentPlan, assertHostFabricMemberContribution, assertLifecyclePlanPosture, assertResolvedMemberRef, assertSubstrateAssociationHandoff, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
+    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, FABRIC, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertCarrierEdgeSessionEvidence, assertConsumerFloor, assertContractTarget, assertContractTargetRegistryPosture, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertHostFabricFulfillmentPlan, assertHostFabricMemberContribution, assertLifecyclePlanPosture, assertResolvedMemberRef, assertSubstrateAssociationHandoff, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
     .replace(/^import \{ deriveRuntimeShellState \} from "\.\/runtime-shell-state\.js";\s*/m, '')}`;
   const runtimeTimers = makeRuntimeTimers();
   const webSockets = [];
@@ -2585,6 +2585,10 @@ test('live swarm edge attach requires resolved member refs and reuses duplicate 
 
   assert.equal(attached.ok, true);
   assert.equal(attached.result.memberRef, BROWSER_PK);
+  assert.equal(attached.result.carrierEdge.kind, protocol.SWARM.RECORD_KIND.CARRIER_EDGE_SESSION_EVIDENCE);
+  assert.equal(attached.result.carrierEdge.adapterKind, protocol.SWARM.CARRIER_EDGE_ADAPTER_KIND.WEB_SOCKET);
+  assert.equal(attached.result.carrierEdge.participantRef, BROWSER_PK);
+  assert.equal(attached.result.carrierEdge.state, protocol.SWARM.CARRIER_EDGE_SESSION_STATE.OPENING);
   assert.equal(runtime.webSockets.length, 1);
   let edgeSnapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
   const attachEvent = edgeSnapshot.result.runtimeEvents.find((entry) => entry.kind === 'adapter.edge.attach');
@@ -2654,6 +2658,9 @@ test('live swarm edge attach waits for runtime authority when member ref is runt
   assert.equal(blockedEvent?.safeFacts?.blockedReason, 'missingRuntimeAuthorityMemberRef');
   assert.equal(blockedEvent?.safeFacts?.retryable, true);
   assert.equal(blockedEvent?.level, 'info');
+  assert.equal(snapshot.result.edge.carrierEdge.kind, protocol.SWARM.RECORD_KIND.CARRIER_EDGE_SESSION_EVIDENCE);
+  assert.equal(snapshot.result.edge.carrierEdge.state, protocol.SWARM.CARRIER_EDGE_SESSION_STATE.BLOCKED);
+  assert.deepEqual(snapshot.result.edge.carrierEdge.blockedReasons, ['missingRuntimeAuthorityMemberRef']);
 });
 
 test('live swarm edge attach is not gated by runtime hydration', () => {

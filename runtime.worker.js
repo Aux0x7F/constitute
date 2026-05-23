@@ -14,6 +14,7 @@ import {
   assertAuthorityGrantRevocationPosture,
   assertAuthorityMultiIdentityProof,
   assertAuthorityRootOperation,
+  assertCarrierEdgeSessionEvidence,
   assertEventAdmissionEnvelope,
   assertEventFabricAccessClass,
   assertEventFabricProcessorContract,
@@ -90,6 +91,9 @@ const SWARM_EDGE_TEST_RECEIVE = 'swarm.edge.test.receive';
 const SWARM_EDGE_SENT_GET = 'swarm.edge.sent.get';
 const SWARM_EDGE_ACK = 'swarm.edge.ack';
 const SWARM_EDGE_REJECT = 'swarm.edge.reject';
+const CARRIER_EDGE_RUNTIME_ADAPTER_REF = 'adapter:runtime-worker:websocket';
+const CARRIER_EDGE_RUNTIME_SELECTION_REF = 'carrier-edge-selection:runtime:swarm-edge';
+const CARRIER_EDGE_EVIDENCE_TTL_MS = 30_000;
 const CONTRIBUTION_LIFECYCLE_LIMIT = 100;
 const RUNTIME_DIAGNOSTICS_SUBSCRIBE = 'runtime.diagnostics.subscribe';
 const RUNTIME_DIAGNOSTICS_UNSUBSCRIBE = 'runtime.diagnostics.unsubscribe';
@@ -3066,6 +3070,7 @@ function swarmQueueObject() {
 }
 
 function edgeSnapshot() {
+  const carrierEdge = carrierEdgeSessionEvidenceObject();
   return {
     mode: swarmEdge.mode,
     connected: swarmEdge.connected,
@@ -3079,6 +3084,8 @@ function edgeSnapshot() {
     repairRequests: swarmEdge.repairRequests.map((entry) => safeClone(entry)),
     routeObservations: swarmEdge.routeObservations.map((entry) => safeClone(entry)),
     contributionLifecycles: swarmEdge.contributionLifecycles.map((entry) => safeClone(entry)),
+    carrierEdge,
+    carrierEdgeSessionEvidence: carrierEdge,
   };
 }
 
@@ -5353,6 +5360,97 @@ function edgeEndpointDiagnosticFacts(endpoint) {
   } catch {
     return {};
   }
+}
+
+function referenceToken(value, fallback = 'unknown') {
+  const token = String(value || '').trim()
+    .replace(/[^a-zA-Z0-9:._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return token || fallback;
+}
+
+function socketReadyStateName(socket) {
+  const state = Number(socket?.readyState ?? -1);
+  if (typeof WebSocket === 'function') {
+    if (state === WebSocket.CONNECTING) return 'connecting';
+    if (state === WebSocket.OPEN) return 'connected';
+    if (state === WebSocket.CLOSING) return 'closing';
+    if (state === WebSocket.CLOSED) return 'closed';
+  }
+  if (state === 0) return 'connecting';
+  if (state === 1) return 'connected';
+  if (state === 2) return 'closing';
+  if (state === 3) return 'closed';
+  return '';
+}
+
+function carrierEdgeBackpressureState() {
+  const queuedCount = outboundSwarmFrames.size;
+  if (queuedCount >= 100) return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.SATURATED;
+  if (queuedCount > 0 || swarmEdge.rejections.length > 0 || swarmEdge.repairRequests.length > 0) {
+    return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.DEGRADED;
+  }
+  return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.CLEAR;
+}
+
+function carrierEdgeSessionState() {
+  if (swarmEdge.mode === 'pendingAuthority') return SWARM.CARRIER_EDGE_SESSION_STATE.BLOCKED;
+  if (swarmEdge.connected === true) return SWARM.CARRIER_EDGE_SESSION_STATE.OPEN;
+  const readyState = socketReadyStateName(swarmEdge.socket);
+  if (readyState === 'connecting') return SWARM.CARRIER_EDGE_SESSION_STATE.OPENING;
+  if (readyState === 'closing') return SWARM.CARRIER_EDGE_SESSION_STATE.CLOSING;
+  if (swarmEdge.mode === 'live' && swarmEdge.socket) return SWARM.CARRIER_EDGE_SESSION_STATE.RECONNECTING;
+  return SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED;
+}
+
+function carrierEdgeSessionEvidenceObject() {
+  const observedAt = nowMs();
+  const state = carrierEdgeSessionState();
+  const socketState = socketReadyStateName(swarmEdge.socket);
+  const participantRef = String(swarmEdge.memberRef || '').trim()
+    || (swarmEdge.mode === 'pendingAuthority' ? 'participant:runtime-authority:pending' : 'participant:runtime:self');
+  const sessionRef = String(swarmEdge.sessionId || '').trim()
+    || `${String(swarmEdge.mode || 'detached').trim() || 'detached'}:${participantRef}`;
+  const blockedReasons = [];
+  if (state === SWARM.CARRIER_EDGE_SESSION_STATE.BLOCKED) {
+    blockedReasons.push(swarmEdge.mode === 'pendingAuthority' ? 'missingRuntimeAuthorityMemberRef' : 'carrierEdgeBlocked');
+  }
+  const record = {
+    kind: SWARM.RECORD_KIND.CARRIER_EDGE_SESSION_EVIDENCE,
+    evidenceId: `carrier-edge-evidence:runtime:${runtimeSessionId}:swarm-edge`,
+    selectionRef: CARRIER_EDGE_RUNTIME_SELECTION_REF,
+    edgeSessionRef: `carrier-edge-session:${referenceToken(sessionRef, 'detached')}`,
+    adapterRef: CARRIER_EDGE_RUNTIME_ADAPTER_REF,
+    adapterKind: SWARM.CARRIER_EDGE_ADAPTER_KIND.WEB_SOCKET,
+    participantRef,
+    state,
+    connectionState: swarmEdge.connected ? 'connected' : (socketState || 'disconnected'),
+    backpressureState: carrierEdgeBackpressureState(),
+    retryPosture: {
+      mode: String(swarmEdge.mode || '').trim() || 'detached',
+      attachInFlight: Boolean(liveSwarmEdgeAttachInFlight),
+      queuedCount: outboundSwarmFrames.size,
+    },
+    releasePosture: {
+      state: state === SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED ? 'released' : 'held',
+    },
+    safeFacts: {
+      mode: String(swarmEdge.mode || '').trim() || 'detached',
+      connected: swarmEdge.connected === true,
+      socketState: socketState || 'unavailable',
+      queuedCount: outboundSwarmFrames.size,
+      sentCount: swarmEdge.sentFrames.length,
+      rejectionCount: swarmEdge.rejections.length,
+      repairRequestCount: swarmEdge.repairRequests.length,
+    },
+    evidenceRefs: [
+      `runtime:${RUNTIME_WORKER_BUILD_ID}`,
+    ],
+    blockedReasons,
+    observedAt,
+    expiresAt: observedAt + CARRIER_EDGE_EVIDENCE_TTL_MS,
+  };
+  return safeClone(assertCarrierEdgeSessionEvidence(record));
 }
 
 async function attachLiveSwarmEdge(message) {

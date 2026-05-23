@@ -92,6 +92,11 @@ export function preparedRuntimeServiceCatalog(snapshot = {}) {
 
 export function preparedSwarmEdgeStatus(snapshot = {}) {
   const edge = snapshot?.edge && typeof snapshot.edge === 'object' ? snapshot.edge : {};
+  const carrierEdge = edge.carrierEdge && typeof edge.carrierEdge === 'object'
+    ? edge.carrierEdge
+    : edge.carrierEdgeSessionEvidence && typeof edge.carrierEdgeSessionEvidence === 'object'
+      ? edge.carrierEdgeSessionEvidence
+      : {};
   const swarmQueue = snapshot?.swarmQueue && typeof snapshot.swarmQueue === 'object' ? snapshot.swarmQueue : {};
   const queueEntries = Object.values(swarmQueue).filter((entry) => entry && typeof entry === 'object');
   const queuedCount = Number(edge.queuedCount ?? queueEntries.length) || 0;
@@ -102,19 +107,33 @@ export function preparedSwarmEdgeStatus(snapshot = {}) {
   const repairRequests = normalizeArray(edge.repairRequests);
   const repairQueueCount = queueEntries.filter((entry) => entry.repairRequest && typeof entry.repairRequest === 'object').length;
   const repairCount = Math.max(repairRequests.length, repairQueueCount);
-  const connected = edge.connected === true;
-  const mode = text(edge.mode) || 'local';
+  const carrierState = text(carrierEdge.state);
+  const carrierConnectionState = text(carrierEdge.connectionState);
+  const carrierBackpressureState = text(carrierEdge.backpressureState);
+  const connected = edge.connected === true || carrierState === 'open' || carrierConnectionState === 'connected';
+  const mode = text(edge.mode || carrierEdge.safeFacts?.mode) || 'local';
   const lastReject = rejections[rejections.length - 1] || queueEntries.find((entry) => entry.lastError)?.lastError || null;
   const rejectMessage = text(lastReject?.error?.message || lastReject?.message || lastReject?.code);
+  const blockedReasons = normalizeArray(carrierEdge.blockedReasons).map(text).filter(Boolean);
+  const carrierLabel = [
+    carrierState ? `carrier ${carrierState}` : '',
+    carrierBackpressureState && carrierBackpressureState !== 'clear' ? carrierBackpressureState : '',
+    blockedReasons.length ? blockedReasons[0] : '',
+  ].filter(Boolean).join(' / ');
 
   return {
     mode,
     connected,
+    carrierEdge,
+    carrierState,
+    carrierConnectionState,
+    carrierBackpressureState,
+    blockedReasons,
     queuedCount,
     sentCount,
     rejectedCount,
     repairCount,
-    edgeLabel: connected ? `${mode} connected` : `${mode} offline`,
+    edgeLabel: carrierLabel || (connected ? `${mode} connected` : `${mode} offline`),
     queueLabel: [
       `${queuedCount} queued`,
       rejectedCount ? `${rejectedCount} rejected` : '',
