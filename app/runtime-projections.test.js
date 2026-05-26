@@ -57,8 +57,8 @@ test('account bridge and shared runtime use the same worker build id', () => {
   assert.match(source, /accountRuntimeClientModule\.createRuntimeSurfaceClient/);
   assert.doesNotMatch(source, /runtime-surface-client\.js/);
   assert.match(source, /from '\.\/runtime-contract\.js'/);
-  assert.match(runtimeContractSource, /PLATFORM_RUNTIME_VERSION = Object\.freeze\(\{ major: 2, minor: 57 \}\)/);
-  assert.match(workerSource, /const RUNTIME_VERSION = Object\.freeze\(\{ major: 2, minor: 57 \}\)/);
+  assert.match(runtimeContractSource, /PLATFORM_RUNTIME_VERSION = Object\.freeze\(\{ major: 2, minor: 61 \}\)/);
+  assert.match(workerSource, /const RUNTIME_VERSION = Object\.freeze\(\{ major: 2, minor: 61 \}\)/);
   assert.match(runtimeContractSource, /target\.searchParams\.set\("v", PLATFORM_RUNTIME_BUILD_ID\)/);
   assert.match(source, /accountRuntimeWorkerScriptUrl\(window\.location\.origin\)/);
   assert.match(source, /workerName: runtimeSharedWorkerName\(\)/);
@@ -332,4 +332,20 @@ test('runtime worker owns projection policy sync instead of UI request assembly'
   assert.match(workerSource, /function handleRuntimeProjectionSyncResponse\(/);
   assert.match(workerSource, /projection\.sync\.diagnostic/);
   assert.doesNotMatch(workerSource, /LOGGING_SYNC_CHANNELS/);
+});
+
+test('runtime worker prepares selected stream operation posture before surface binding', () => {
+  assert.match(workerSource, /assertOperationInstancePosture/);
+  assert.match(workerSource, /function runtimeStreamOperationInstancePosture\(/);
+  assert.match(workerSource, /runtimeStreamSelectedMethodRef\(method\)/);
+  assert.match(workerSource, /stream operationRef must be allocated by runtime open-intent posture/);
+  assert.match(workerSource, /operationInstancePosture = runtimeStreamOperationInstancePosture\(RUNTIME_APP_INTENT\.STREAM_OPEN, boundIntent/);
+  assert.match(workerSource, /operationRef: boundIntent\.operationRef/);
+  assert.match(workerSource, /operationClassRef: boundIntent\.operationClassRef/);
+  assert.match(workerSource, /methodRef: boundIntent\.methodRef/);
+  assert.match(workerSource, /role:runtime:operation-binding/);
+  assert.match(workerSource, /role:surface:element-binding/);
+  assert.match(workerSource, /surfaceBindingObservationPending/);
+  assert.match(workerSource, /surfaceAbsenceDoesNotBlockRuntime: true/);
+  assert.match(workerSource, /surfaceDoesNotSupplyFlowTruth: true/);
 });

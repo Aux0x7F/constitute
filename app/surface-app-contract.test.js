@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   accountRuntimeClientModule,
+  accountRuntimeRunnerBridgeModule,
   accountServiceManagerOperationPosture,
   accountServiceManagerProofDigest,
   accountServiceManagerSecretBoundary,
@@ -23,12 +24,14 @@ test("account ui declares its surface app modules before runtime attach", () => 
   assert.equal(accountSurfaceApp.hasRole("runtimeClient"), true);
   assert.equal(accountSurfaceApp.hasRole("projectionModel"), true);
   assert.equal(accountSurfaceApp.hasRole("platformAdapter"), true);
+  assert.equal(accountSurfaceApp.hasRole("runtimeRunnerBridge"), true);
   assert.equal(accountSurfaceApp.hasRole("productView"), true);
   assert.equal(accountSurfaceModuleRegistry.kind, "surface.module.registry");
   assert.equal(accountSurfaceModules.state, "ready");
   assert.equal(accountSurfaceSelectionReadModel.kind, "surface.app.selection.readModel");
   assert.equal(accountSurfaceSelectionReadModel.state, "ready");
   assert.equal(typeof accountRuntimeClientModule.createRuntimeSurfaceClient, "function");
+  assert.equal(typeof accountRuntimeRunnerBridgeModule.createRuntimeRunnerBridge, "function");
   assert.equal(accountSurfaceAttachContext.kind, "surface.app.attachContext");
   assert.equal(accountSurfaceAttachContext.appId, "constitute-account");
   assert.equal(accountSurfaceAppInstancePosture.kind, "surface.app.instance.posture");
@@ -38,7 +41,7 @@ test("account ui declares its surface app modules before runtime attach", () => 
   assert.equal(accountSurfaceRuntimeSelectionPosture.kind, "surface.app.runtime.selection.posture");
   assert.equal(accountSurfaceRuntimeSelectionPosture.state, "ready");
   assert.equal(accountSurfaceRuntimeSelectionPosture.pinnedAppContractRef, "app:account-ui");
-  assert.equal(accountSurfaceAttachContext.moduleRefs.length, 4);
+  assert.equal(accountSurfaceAttachContext.moduleRefs.length, 5);
   assert.equal(accountSurfaceBootstrapPosture.state, "ready");
   assert.equal(accountSurfaceRunnerPlan.kind, "surface.app.runner.plan");
   assert.equal(accountSurfaceRunnerPlan.state, "ready");

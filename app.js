@@ -19,6 +19,9 @@ import {
 } from './app/runtime-ui.js';
 import {
   PLATFORM_RUNTIME_BUILD_ID,
+  RUNTIME_RUNNER_BRIDGE_POSTURE_PUT,
+  RUNTIME_RUNNER_HOST_FULFILLMENT_PUT,
+  RUNTIME_RUNNER_OPERATION_SUBMIT,
   runtimeSharedWorkerName,
   runtimeWorkerScriptUrl as accountRuntimeWorkerScriptUrl,
 } from './runtime-contract.js';
@@ -36,6 +39,7 @@ import {
 } from './runtime-shell-state.js';
 import {
   accountRuntimeClientModule,
+  accountRuntimeRunnerBridgeModule,
   accountSurfaceAttachContext,
 } from './surface-app-contract.js';
 
@@ -409,6 +413,8 @@ const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
 let relayBridge = null;
 let relayPoolSnapshot = { version: '', urls: [], relays: {}, state: 'offline', reason: '', ingress: null };
 let runtimeBridge = null;
+let runtimeRunnerBridge = null;
+let runtimeRunnerBridgePostureKey = '';
 let runtimeDiagnosticsAgent = null;
 let runtimeAttached = false;
 let runtimeStatusSnapshot = {
@@ -1944,6 +1950,134 @@ async function pushRuntimeAuthorityDevice() {
   await runtimeBridge.putRuntimeAuthorityDevice(device);
 }
 
+function selectedRuntimeRunnerBridgeModule() {
+  const refs = Array.isArray(accountSurfaceAttachContext?.moduleRefs)
+    ? accountSurfaceAttachContext.moduleRefs
+    : [];
+  return refs.find((module) => String(module?.role || '').trim() === 'runtimeRunnerBridge') || null;
+}
+
+function runtimeRunnerDispatchAdapter() {
+  const registration = globalThis.constituteRuntimeRunnerBridge && typeof globalThis.constituteRuntimeRunnerBridge === 'object'
+    ? globalThis.constituteRuntimeRunnerBridge
+    : null;
+  const host = registration ? registration.fulfillDispatch : null;
+  const direct = globalThis.constituteRuntimeRunnerFulfillDispatch || globalThis.__constituteRuntimeRunnerFulfillDispatch;
+  if (typeof host === 'function') {
+    return {
+      fulfillDispatch: host,
+      adapterRef: String(registration.adapterRef || 'adapter:runtime-runner-bridge:host-selected'),
+      safeFacts: registration.safeFacts && typeof registration.safeFacts === 'object'
+        ? registration.safeFacts
+        : {},
+    };
+  }
+  if (typeof direct === 'function') {
+    return {
+      fulfillDispatch: direct,
+      adapterRef: 'adapter:runtime-runner-bridge:direct-global',
+      safeFacts: {},
+    };
+  }
+  return null;
+}
+
+function acceptedRuntimeRunnerDispatches(snapshot) {
+  const entries = snapshot?.runnerOperations && typeof snapshot.runnerOperations === 'object'
+    ? Object.values(snapshot.runnerOperations)
+    : [];
+  const seen = new Set();
+  return entries.filter((entry) => {
+    const operationId = String(entry?.operationId || entry?.runnerOperation?.operationId || '').trim();
+    const state = String(entry?.state || entry?.hostFulfillmentPosture?.state || '').trim();
+    if (!operationId || seen.has(operationId) || state !== 'accepted') return false;
+    seen.add(operationId);
+    return true;
+  });
+}
+
+function runtimeRunnerBridgePostureStableKey(posture) {
+  return JSON.stringify([
+    String(posture?.bridgeRef || ''),
+    String(posture?.state || ''),
+    String(posture?.dispatchId || ''),
+    String(posture?.operationId || ''),
+    Number(posture?.fulfilledCount || 0),
+    Number(posture?.skippedCount || 0),
+    ...(Array.isArray(posture?.blockedReasons) ? posture.blockedReasons : []),
+  ]);
+}
+
+function putRuntimeRunnerBridgePostureOnce(bridge, posture) {
+  const key = runtimeRunnerBridgePostureStableKey(posture);
+  if (!key || key === runtimeRunnerBridgePostureKey) return;
+  runtimeRunnerBridgePostureKey = key;
+  bridge.putRuntimeRunnerBridgePosture(posture).catch((err) => {
+    console.warn('[runtime] runner bridge posture failed', err);
+  });
+}
+
+function startRuntimeRunnerBridge(bridge, runtimeClient) {
+  const selectedModule = selectedRuntimeRunnerBridgeModule();
+  const createRuntimeRunnerBridge = accountRuntimeRunnerBridgeModule?.createRuntimeRunnerBridge;
+  if (!selectedModule || typeof createRuntimeRunnerBridge !== 'function') return null;
+  const bridgeRef = String(selectedModule.moduleRef || 'constitute-ui/runtime-runner-bridge@0.1.0');
+  return createRuntimeRunnerBridge({
+    runtimeClient,
+    bridgeRef,
+    runtimeRef: `runtime:${PLATFORM_RUNTIME_BUILD_ID}`,
+    adapterRef: 'adapter:runtime-runner-bridge:host-selected',
+    fulfillDispatch: async (context) => {
+      const adapter = runtimeRunnerDispatchAdapter();
+      if (!adapter) throw new Error('host runner adapter is not registered');
+      return await adapter.fulfillDispatch(context);
+    },
+    onPosture: (posture) => {
+      const adapter = runtimeRunnerDispatchAdapter();
+      putRuntimeRunnerBridgePostureOnce(bridge, {
+        ...posture,
+        adapterRef: adapter?.adapterRef || posture.adapterRef,
+        safeFacts: {
+          ...(posture.safeFacts && typeof posture.safeFacts === 'object' ? posture.safeFacts : {}),
+          ...(adapter?.safeFacts && typeof adapter.safeFacts === 'object' ? adapter.safeFacts : {}),
+          hostAdapterRegistered: Boolean(adapter),
+        },
+      });
+    },
+  });
+}
+
+function observeRuntimeRunnerBridgeSnapshot(bridge, snapshot) {
+  if (!runtimeRunnerBridge) return;
+  const dispatches = acceptedRuntimeRunnerDispatches(snapshot);
+  const adapter = runtimeRunnerDispatchAdapter();
+  if (!adapter) {
+    putRuntimeRunnerBridgePostureOnce(bridge, {
+      kind: 'runtime.runner.bridge.posture',
+      state: dispatches.length ? 'blocked' : 'idle',
+      bridgeRef: String(selectedRuntimeRunnerBridgeModule()?.moduleRef || 'constitute-ui/runtime-runner-bridge@0.1.0'),
+      runtimeRef: `runtime:${PLATFORM_RUNTIME_BUILD_ID}`,
+      adapterRef: 'adapter:runtime-runner-bridge:host-selected',
+      skippedCount: dispatches.length,
+      blockedReasons: dispatches.length ? ['runtimeRunnerBridge:hostAdapterMissing'] : [],
+      safeFacts: { hostAdapterRegistered: false },
+      observedAt: Date.now(),
+    });
+    return;
+  }
+  runtimeRunnerBridge.processSnapshot(snapshot).catch((err) => {
+    putRuntimeRunnerBridgePostureOnce(bridge, {
+      kind: 'runtime.runner.bridge.posture',
+      state: 'blocked',
+      bridgeRef: String(selectedRuntimeRunnerBridgeModule()?.moduleRef || 'constitute-ui/runtime-runner-bridge@0.1.0'),
+      runtimeRef: `runtime:${PLATFORM_RUNTIME_BUILD_ID}`,
+      adapterRef: 'adapter:runtime-runner-bridge:host-selected',
+      blockedReasons: [`runtimeRunnerBridge:${String(err?.message || err || 'failed')}`],
+      observedAt: Date.now(),
+    });
+  });
+}
+
 function startPlatformRuntimeBridge() {
   if (typeof SharedWorker === 'undefined') {
     console.warn('[runtime] SharedWorker unavailable; managed app surfaces require the shared runtime');
@@ -1964,6 +2098,7 @@ function startPlatformRuntimeBridge() {
     attachError: null,
     close() {
       try { this.client?.close?.(); } catch {}
+      if (runtimeRunnerBridge) runtimeRunnerBridge = null;
     },
   };
   bridge.readyPromise = new Promise((resolve, reject) => {
@@ -2014,6 +2149,33 @@ function startPlatformRuntimeBridge() {
   }
 
   bridge.call = runtimeCall;
+  bridge.submitRunnerOperation = async (runnerOperation, timeoutMs = RUNTIME_WRITE_TIMEOUT_MS) => {
+    await bridge.whenReady();
+    return await runtimeCall(RUNTIME_RUNNER_OPERATION_SUBMIT, { runnerOperation }, timeoutMs);
+  };
+  bridge.putRunnerHostFulfillmentPosture = async (
+    hostFulfillmentPosture,
+    runtimeReportMessageOrTimeoutMs = null,
+    sourceDispatch = null,
+    timeoutMs = RUNTIME_WRITE_TIMEOUT_MS,
+  ) => {
+    await bridge.whenReady();
+    const runtimeReportMessage = runtimeReportMessageOrTimeoutMs
+      && typeof runtimeReportMessageOrTimeoutMs === 'object'
+      && !Array.isArray(runtimeReportMessageOrTimeoutMs)
+      ? runtimeReportMessageOrTimeoutMs
+      : null;
+    const finalTimeoutMs = runtimeReportMessage ? timeoutMs : (runtimeReportMessageOrTimeoutMs || RUNTIME_WRITE_TIMEOUT_MS);
+    return await runtimeCall(RUNTIME_RUNNER_HOST_FULFILLMENT_PUT, {
+      hostFulfillmentPosture,
+      ...(runtimeReportMessage ? { runtimeReportMessage } : {}),
+      ...(sourceDispatch && typeof sourceDispatch === 'object' ? { sourceDispatch } : {}),
+    }, finalTimeoutMs);
+  };
+  bridge.putRuntimeRunnerBridgePosture = async (posture, timeoutMs = RUNTIME_WRITE_TIMEOUT_MS) => {
+    await bridge.whenReady();
+    return await runtimeCall(RUNTIME_RUNNER_BRIDGE_POSTURE_PUT, { posture }, timeoutMs);
+  };
   bridge.queueAppIntent = async (type, payload = {}, timeoutMs = RUNTIME_WRITE_TIMEOUT_MS) => {
     await bridge.whenReady();
     return await runtimeCall(type, { payload }, timeoutMs);
@@ -2065,6 +2227,7 @@ function startPlatformRuntimeBridge() {
     renderConnectionModel();
     pushRuntimeAuthorityDevice().catch(() => {});
     pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
+    observeRuntimeRunnerBridgeSnapshot(bridge, bridge.snapshot);
     clearShellBootFallbackTimer();
     tryDismissShellBootSplash('shell.first-paint.snapshot');
   }
@@ -2167,6 +2330,7 @@ function startPlatformRuntimeBridge() {
     },
   });
   bridge.client = runtimeClient;
+  runtimeRunnerBridge = startRuntimeRunnerBridge(bridge, runtimeClient);
   const port = runtimeClient.attach();
   if (!port) return null;
   bridge.port = port;

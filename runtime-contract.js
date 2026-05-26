@@ -1,6 +1,7 @@
-export const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 57 });
+export const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 61 });
 export const PLATFORM_RUNTIME_BUILD_ID = `runtime-${PLATFORM_RUNTIME_VERSION.major}.${PLATFORM_RUNTIME_VERSION.minor}`;
 export const PLATFORM_RUNTIME_WORKER_PATH = "/constitute-account/runtime.worker.js";
+export const RUNTIME_STREAM_PREPARE = "runtime.stream.prepare";
 export const RUNTIME_STREAM_OPEN = "runtime.stream.open";
 export const RUNTIME_STREAM_CONTROL = "runtime.stream.control";
 export const RUNTIME_STREAM_CLOSE = "runtime.stream.close";
@@ -9,6 +10,11 @@ export const RUNTIME_AUTHORITY_POSTURE_GET = "runtime.authority.posture.get";
 export const RUNTIME_MEDIA_TRANSPORT_PROFILE_GET = "runtime.media.transport.profile.get";
 export const RUNTIME_MEDIA_TRANSPORT_OBSERVATION_PUT = "runtime.media.transport.observation.put";
 export const RUNTIME_MEDIA_FULFILLMENT_EVIDENCE_PUT = "runtime.media.fulfillment.evidence.put";
+export const RUNTIME_RUNNER_OPERATION_SUBMIT = "runtime.runner.operation.submit";
+export const RUNTIME_RUNNER_HOST_FULFILLMENT_PUT = "runtime.runner.host.fulfillment.put";
+export const RUNTIME_RUNNER_BRIDGE_POSTURE_PUT = "runtime.runner.bridge.posture.put";
+export const RUNTIME_FULFILLMENT_SESSION_PROJECTION_PUT = "runtime.fulfillment-session.projection.put";
+export const RUNTIME_FULFILLMENT_SESSION_PROJECTION_GET = "runtime.fulfillment-session.projection.get";
 
 function runtimeOrigin(origin = "") {
   const explicit = String(origin || "").trim();

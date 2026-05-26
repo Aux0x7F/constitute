@@ -129,7 +129,7 @@ function loadRuntime(store = new Map(), options = {}) {
     });
   }
   const source = `${shellStateSource}\n${raw
-    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, FABRIC, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertCarrierEdgeSessionEvidence, assertConsumerFloor, assertContractTarget, assertContractTargetRegistryPosture, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertHostFabricFulfillmentPlan, assertHostFabricMemberContribution, assertLifecyclePlanPosture, assertResolvedMemberRef, assertSubstrateAssociationHandoff, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
+    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, FABRIC, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, RUNNER, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertCarrierEdgeSessionEvidence, assertConsumerFloor, assertContractTarget, assertContractTargetRegistryPosture, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertHostFabricFulfillmentPlan, assertHostFabricMemberContribution, assertLifecyclePlanPosture, assertResolvedMemberRef, assertSubstrateAssociationHandoff, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertFulfillmentSession, assertRunnerOperation, assertRunnerHostFulfillmentPosture, assertRuntimeFulfillmentSessionProjection, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
     .replace(/^import \{ deriveRuntimeShellState \} from "\.\/runtime-shell-state\.js";\s*/m, '')}`;
   const runtimeTimers = makeRuntimeTimers();
   const webSockets = [];
@@ -197,6 +197,446 @@ async function attach(port) {
   port.onmessage({ data: { type: 'runtime.attach', clientId: `test-${Math.random().toString(36).slice(2)}` } });
   return await waitFor(() => port.messages.find((entry) => entry.type === 'runtime.attached'));
 }
+
+function moduleLoadRunnerOperation(overrides = {}) {
+  const observedAt = Date.now();
+  return {
+    kind: 'runner.operation',
+    operationId: 'runner-operation:module-load:module:native-dev:constitute-account:test',
+    runnerId: 'runner:browser-runtime',
+    runnerRef: BROWSER_PK,
+    hostRef: 'host:browser-runtime',
+    requesterRef: 'surface:account-ui',
+    subjectRef: 'module:native-dev:constitute-account',
+    contractRef: 'module:native-dev:constitute-account',
+    operation: protocol.RUNNER.OPERATION.EXECUTE,
+    state: protocol.RUNNER.OPERATION_STATE.ACCEPTED,
+    grantRefs: ['grant:runner:module-load'],
+    capabilityRefs: ['capability:runner.module.load'],
+    inputRefs: [
+      'module-resolver:native-dev:account',
+      'module:native-dev:constitute-account',
+      'artifact:native-dev:constitute-account:abc123',
+      'materialized:path:workspace-dev:constitute-account',
+      'storage:materialized-local:constitute-account',
+    ],
+    outputRefs: [
+      'module-load:module:native-dev:constitute-account',
+      'artifact:native-dev:constitute-account:abc123',
+    ],
+    evidenceRefs: ['runner:evidence:module-resolution', 'runner:evidence:module-load'],
+    proofRefs: [],
+    releaseRefs: [],
+    resourceBudget: { maxMemoryMiB: 256, maxCpuPct: 25 },
+    secretBoundary: { state: 'notRequired' },
+    blockedReasons: [],
+    safeFacts: {
+      executionKind: 'nativeModuleLoad',
+      moduleArtifactRefCount: 1,
+      moduleStorageRefCount: 1,
+    },
+    requestedAt: observedAt,
+    observedAt,
+    rollbackRef: 'rollback:module:native-dev:constitute-account',
+    ...overrides,
+  };
+}
+
+function runnerHostFulfillmentPosture(runnerOperation, overrides = {}) {
+  const observedAt = Date.now();
+  return protocol.assertRunnerHostFulfillmentPosture({
+    kind: protocol.SWARM.RECORD_KIND.RUNNER_HOST_FULFILLMENT_POSTURE,
+    postureId: `runner-host:${runnerOperation.runnerId}:${runnerOperation.operationId}`,
+    runnerId: runnerOperation.runnerId,
+    runnerRef: runnerOperation.runnerRef,
+    hostRef: runnerOperation.hostRef,
+    operationId: runnerOperation.operationId,
+    operation: runnerOperation.operation,
+    state: protocol.RUNNER.HOST_FULFILLMENT_STATE.SUCCEEDED,
+    requesterRef: runnerOperation.requesterRef,
+    subjectRef: runnerOperation.subjectRef,
+    contractRef: runnerOperation.contractRef,
+    contractRefs: [runnerOperation.contractRef],
+    grantRefs: runnerOperation.grantRefs,
+    capabilityRefs: runnerOperation.capabilityRefs,
+    inputRefs: runnerOperation.inputRefs,
+    outputRefs: runnerOperation.outputRefs,
+    evidenceRefs: [...runnerOperation.evidenceRefs, 'runner:evidence:module-load-terminal'],
+    proofRefs: runnerOperation.proofRefs,
+    releaseRefs: runnerOperation.releaseRefs,
+    witnessRefs: ['witness:runner:module-load'],
+    resourceBudget: runnerOperation.resourceBudget,
+    resourcePosture: null,
+    secretBoundary: runnerOperation.secretBoundary,
+    releasePosture: null,
+    rollbackPosture: null,
+    rollbackRef: runnerOperation.rollbackRef,
+    blockedReasons: [],
+    safeFacts: {
+      ...runnerOperation.safeFacts,
+      runtimeDispatch: false,
+      terminalRunnerReport: true,
+    },
+    observedAt,
+    expiresAt: observedAt + 60_000,
+    ...overrides,
+  });
+}
+
+function fulfillmentSessionForRunnerOperation(runnerOperation, overrides = {}) {
+  const observedAt = Date.now();
+  return protocol.assertFulfillmentSession({
+    kind: protocol.SWARM.RECORD_KIND.FULFILLMENT_SESSION,
+    sessionId: `fulfillment-session:${runnerOperation.operationId}`,
+    parentIntentRef: 'promotion:intent:native-dev:constitute-account:test',
+    subjectRef: runnerOperation.subjectRef,
+    contractRef: runnerOperation.contractRef,
+    state: protocol.SWARM.FULFILLMENT_SESSION_STATE.RUNNING,
+    nodePostures: [
+      {
+        nodeRef: 'node:runtime:account',
+        role: protocol.SWARM.FULFILLMENT_SESSION_NODE_ROLE.RUNTIME,
+        state: protocol.SWARM.FULFILLMENT_SESSION_STATE.RUNNING,
+        participantRef: 'runtime:account',
+        inputRefs: [runnerOperation.contractRef],
+        evidenceRefs: ['evidence:runtime:runner-report'],
+        blockedReasons: [],
+      },
+      {
+        nodeRef: 'node:runner:browser',
+        role: protocol.SWARM.FULFILLMENT_SESSION_NODE_ROLE.PROCESSOR,
+        state: protocol.SWARM.FULFILLMENT_SESSION_STATE.RUNNING,
+        participantRef: runnerOperation.runnerRef,
+        inputRefs: runnerOperation.inputRefs,
+        outputRefs: runnerOperation.outputRefs,
+        evidenceRefs: runnerOperation.evidenceRefs,
+        blockedReasons: [],
+      },
+    ],
+    lifecyclePlanRefs: [runnerOperation.contractRef],
+    availabilityRefs: ['storage-availability:constitute-account:test'],
+    evidenceRefs: ['evidence:fulfillment-session:runner-module-load'],
+    releaseRefs: runnerOperation.releaseRefs,
+    blockedReasons: [],
+    safeFacts: {
+      promotionIntentRef: 'promotion:intent:native-dev:constitute-account:test',
+      moduleRef: runnerOperation.subjectRef,
+    },
+    issuedAt: observedAt,
+    observedAt,
+    expiresAt: observedAt + 60_000,
+    ...overrides,
+  });
+}
+
+function fulfillmentSessionProjectionForRunnerOperation(runnerOperation, fulfillmentSession, overrides = {}) {
+  const observedAt = Date.now();
+  return protocol.assertRuntimeFulfillmentSessionProjection({
+    kind: protocol.SWARM.RECORD_KIND.RUNTIME_FULFILLMENT_SESSION_PROJECTION,
+    projectionRef: `runtime:fulfillment-session:projection:${fulfillmentSession.sessionId}`,
+    state: protocol.FABRIC.LIFECYCLE_MANIFEST_STATE.READY,
+    sessionId: fulfillmentSession.sessionId,
+    lifecycleManifestRef: runnerOperation.contractRef,
+    parentIntentRef: fulfillmentSession.parentIntentRef,
+    subjectRef: runnerOperation.subjectRef,
+    contractRef: runnerOperation.contractRef,
+    hostRef: runnerOperation.hostRef,
+    runnerRef: runnerOperation.runnerRef,
+    storageAvailabilityRefs: fulfillmentSession.availabilityRefs,
+    storageRefs: ['storage:object:constitute-account:test'],
+    executableRefs: ['executable:module:constitute-account:test'],
+    adapterDebtState: protocol.FABRIC.ADAPTER_DEBT_STATE.TRACKING,
+    adapterDebtRef: 'adapter.debt.posture',
+    queryKeys: {
+      bySession: fulfillmentSession.sessionId,
+      byManifest: runnerOperation.contractRef,
+      byParentIntent: fulfillmentSession.parentIntentRef,
+      bySubject: runnerOperation.subjectRef,
+      byHost: runnerOperation.hostRef,
+      byRunner: runnerOperation.runnerRef,
+      byStorageAvailability: fulfillmentSession.availabilityRefs,
+      byAdapterDebt: protocol.FABRIC.ADAPTER_DEBT_STATE.TRACKING,
+    },
+    currentPosture: {
+      hostFulfillmentState: protocol.RUNNER.HOST_FULFILLMENT_STATE.SUCCEEDED,
+    },
+    evidenceRefs: ['evidence:runtime:fulfillment-session-projection'],
+    blockedReasons: [],
+    safeFacts: {
+      lateConsumerQueryable: true,
+      adapterDebtTracked: true,
+    },
+    observedAt,
+    expiresAt: observedAt + 60_000,
+    ...overrides,
+  });
+}
+
+async function seedRuntimeExecutionFulfillmentSelection(port, overrides = {}) {
+  const runnerOperation = moduleLoadRunnerOperation({
+    operationId: 'runner-operation:module-load:module:native-dev:constitute-account:target-selection',
+    ...overrides.runnerOperation,
+  });
+  const fulfillmentSession = fulfillmentSessionForRunnerOperation(
+    runnerOperation,
+    overrides.fulfillmentSession || {},
+  );
+  const fulfillmentSessionProjection = fulfillmentSessionProjectionForRunnerOperation(
+    runnerOperation,
+    fulfillmentSession,
+    overrides.fulfillmentSessionProjection || {},
+  );
+  const bridgePosture = {
+    kind: 'runtime.runner.bridge.posture',
+    bridgeRef: 'constitute-ui/runtime-runner-bridge@0.1.0',
+    state: 'idle',
+    runtimeRef: 'runtime:test',
+    adapterRef: 'adapter:host-runner:native',
+    blockedReasons: [],
+    safeFacts: { hostAdapterRegistered: true },
+    observedAt: Date.now(),
+    ...(overrides.bridgePosture || {}),
+  };
+  await send(port, {
+    type: 'runtime.runner.bridge.posture.put',
+    posture: bridgePosture,
+  });
+  await send(port, {
+    type: 'runtime.fulfillment-session.projection.put',
+    fulfillmentSessionProjection,
+  });
+  return { runnerOperation, fulfillmentSession, fulfillmentSessionProjection, bridgePosture };
+}
+
+test('runtime consumes module-load runner operation from attach context', async () => {
+  const runtime = loadRuntime(new Map());
+  const runnerOperation = moduleLoadRunnerOperation();
+  runtime.port.onmessage({
+    data: {
+      type: 'runtime.attach',
+      clientId: 'surface-module-load',
+      surface: 'account-ui',
+      attachContext: { moduleLoadRunnerOperation: runnerOperation },
+    },
+  });
+  const attached = await waitFor(() => runtime.port.messages.find((entry) => entry.type === 'runtime.attached'));
+  const dispatch = attached.snapshot.runnerOperations?.[runnerOperation.operationId];
+
+  assert.equal(dispatch.kind, 'runtime.runner.operation.dispatch');
+  assert.equal(dispatch.state, protocol.RUNNER.HOST_FULFILLMENT_STATE.ACCEPTED);
+  assert.equal(dispatch.source, 'attachContext.moduleLoadRunnerOperation');
+  assert.equal(dispatch.runnerOperation.operationId, runnerOperation.operationId);
+  assert.equal(dispatch.hostFulfillmentPosture.kind, protocol.SWARM.RECORD_KIND.RUNNER_HOST_FULFILLMENT_POSTURE);
+  assert.equal(dispatch.hostFulfillmentPosture.state, protocol.RUNNER.HOST_FULFILLMENT_STATE.ACCEPTED);
+  assert.equal(dispatch.hostFulfillmentPosture.safeFacts.executionKind, 'nativeModuleLoad');
+  assert.equal(protocol.assertRunnerHostFulfillmentPosture(dispatch.hostFulfillmentPosture), dispatch.hostFulfillmentPosture);
+});
+
+test('runtime accepts explicit runner operation submission', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const runnerOperation = moduleLoadRunnerOperation({
+    operationId: 'runner-operation:module-load:module:native-dev:constitute-account:explicit',
+  });
+
+  const submitted = await send(runtime.port, {
+    type: 'runtime.runner.operation.submit',
+    runnerOperation,
+  });
+
+  assert.equal(submitted.ok, true);
+  assert.equal(submitted.result.operationId, runnerOperation.operationId);
+  assert.equal(submitted.result.hostFulfillmentPosture.state, protocol.RUNNER.HOST_FULFILLMENT_STATE.ACCEPTED);
+
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  assert.equal(snapshot.result.runnerOperations[runnerOperation.operationId].operationId, runnerOperation.operationId);
+});
+
+test('runtime accepts runner host fulfillment report for dispatched module load', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const runnerOperation = moduleLoadRunnerOperation({
+    operationId: 'runner-operation:module-load:module:native-dev:constitute-account:reported',
+  });
+  const submitted = await send(runtime.port, {
+    type: 'runtime.runner.operation.submit',
+    runnerOperation,
+  });
+  assert.equal(submitted.ok, true);
+  assert.equal(submitted.result.state, protocol.RUNNER.HOST_FULFILLMENT_STATE.ACCEPTED);
+
+  const hostFulfillmentPosture = runnerHostFulfillmentPosture(runnerOperation);
+  const reported = await send(runtime.port, {
+    type: 'runtime.runner.host.fulfillment.put',
+    hostFulfillmentPosture,
+  });
+
+  assert.equal(reported.ok, true);
+  assert.equal(reported.result.state, protocol.RUNNER.HOST_FULFILLMENT_STATE.SUCCEEDED);
+  assert.equal(reported.result.runnerOperation.operationId, runnerOperation.operationId);
+  assert.equal(reported.result.hostFulfillmentPosture.safeFacts.terminalRunnerReport, true);
+
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  const dispatch = snapshot.result.runnerOperations[runnerOperation.operationId];
+  assert.equal(dispatch.state, protocol.RUNNER.HOST_FULFILLMENT_STATE.SUCCEEDED);
+  assert.equal(dispatch.hostFulfillmentPosture.state, protocol.RUNNER.HOST_FULFILLMENT_STATE.SUCCEEDED);
+  assert.equal(dispatch.hostFulfillmentPosture.operationId, runnerOperation.operationId);
+});
+
+test('runtime indexes fulfillment-session projection from runner runtime report message', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const runnerOperation = moduleLoadRunnerOperation({
+    operationId: 'runner-operation:module-load:module:native-dev:constitute-account:projection',
+  });
+  await send(runtime.port, {
+    type: 'runtime.runner.operation.submit',
+    runnerOperation,
+  });
+  const hostFulfillmentPosture = runnerHostFulfillmentPosture(runnerOperation);
+  const fulfillmentSession = fulfillmentSessionForRunnerOperation(runnerOperation);
+  const fulfillmentSessionProjection = fulfillmentSessionProjectionForRunnerOperation(
+    runnerOperation,
+    fulfillmentSession,
+  );
+
+  const reported = await send(runtime.port, {
+    type: 'runtime.runner.host.fulfillment.put',
+    runtimeReportMessage: {
+      type: 'runtime.runner.host.fulfillment.put',
+      hostFulfillmentPosture,
+      fulfillmentSession,
+      fulfillmentSessionProjection,
+    },
+  });
+
+  assert.equal(reported.ok, true);
+  assert.equal(
+    reported.result.runtimeFulfillmentSessionProjection.projectionRef,
+    fulfillmentSessionProjection.projectionRef,
+  );
+
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  assert.equal(
+    snapshot.result.runtimeFulfillmentSessionProjections[fulfillmentSessionProjection.projectionRef].sessionId,
+    fulfillmentSession.sessionId,
+  );
+  assert.deepEqual(
+    snapshot.result.runtimeFulfillmentSessionProjectionIndex.bySession[fulfillmentSession.sessionId],
+    [fulfillmentSessionProjection.projectionRef],
+  );
+  assert.deepEqual(
+    snapshot.result.runtimeFulfillmentSessionProjectionIndex.byManifest[runnerOperation.contractRef],
+    [fulfillmentSessionProjection.projectionRef],
+  );
+  assert.deepEqual(
+    snapshot.result.runtimeFulfillmentSessionProjectionIndex.byParentIntent[fulfillmentSession.parentIntentRef],
+    [fulfillmentSessionProjection.projectionRef],
+  );
+  assert.deepEqual(
+    snapshot.result.runtimeFulfillmentSessionProjectionIndex.bySubject[runnerOperation.subjectRef],
+    [fulfillmentSessionProjection.projectionRef],
+  );
+  assert.deepEqual(
+    snapshot.result.runtimeFulfillmentSessionProjectionIndex.byHost[runnerOperation.hostRef],
+    [fulfillmentSessionProjection.projectionRef],
+  );
+  assert.deepEqual(
+    snapshot.result.runtimeFulfillmentSessionProjectionIndex.byRunner[runnerOperation.runnerRef],
+    [fulfillmentSessionProjection.projectionRef],
+  );
+  assert.deepEqual(
+    snapshot.result.runtimeFulfillmentSessionProjectionIndex.byStorageAvailability['storage-availability:constitute-account:test'],
+    [fulfillmentSessionProjection.projectionRef],
+  );
+  assert.deepEqual(
+    snapshot.result.runtimeFulfillmentSessionProjectionIndex.byAdapterDebt[protocol.FABRIC.ADAPTER_DEBT_STATE.TRACKING],
+    [fulfillmentSessionProjection.projectionRef],
+  );
+
+  const queried = await send(runtime.port, {
+    type: 'runtime.fulfillment-session.projection.get',
+    sessionId: fulfillmentSession.sessionId,
+  });
+  assert.equal(queried.ok, true);
+  assert.equal(queried.result.projections.length, 1);
+  assert.equal(queried.result.projections[0].projectionRef, fulfillmentSessionProjection.projectionRef);
+  const manifestQueried = await send(runtime.port, {
+    type: 'runtime.fulfillment-session.projection.get',
+    byManifest: runnerOperation.contractRef,
+    byParentIntent: fulfillmentSession.parentIntentRef,
+    byStorageAvailability: 'storage-availability:constitute-account:test',
+    byAdapterDebt: protocol.FABRIC.ADAPTER_DEBT_STATE.TRACKING,
+  });
+  assert.equal(manifestQueried.ok, true);
+  assert.equal(manifestQueried.result.projections.length, 1);
+  assert.equal(manifestQueried.result.projections[0].projectionRef, fulfillmentSessionProjection.projectionRef);
+});
+
+test('runtime accepts runtime runner bridge posture without treating it as execution', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const posture = {
+    kind: 'runtime.runner.bridge.posture',
+    bridgeRef: 'constitute-ui/runtime-runner-bridge@0.1.0',
+    state: 'blocked',
+    runtimeRef: 'runtime:test',
+    adapterRef: 'adapter:runtime-runner-bridge:host-selected',
+    skippedCount: 1,
+    blockedReasons: ['runtimeRunnerBridge:hostAdapterMissing'],
+    safeFacts: { hostAdapterRegistered: false },
+    observedAt: Date.now(),
+  };
+
+  const reported = await send(runtime.port, {
+    type: 'runtime.runner.bridge.posture.put',
+    posture,
+  });
+
+  assert.equal(reported.ok, true);
+  assert.equal(reported.result.kind, 'runtime.runner.bridge.posture');
+  assert.equal(reported.result.state, 'blocked');
+  assert.equal(reported.result.safeFacts.hostAdapterRegistered, false);
+
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  const stored = snapshot.result.runtimeRunnerBridgePostures[posture.bridgeRef];
+  assert.equal(stored.state, 'blocked');
+  assert.equal(stored.blockedReasons[0], 'runtimeRunnerBridge:hostAdapterMissing');
+  assert.equal(Object.keys(snapshot.result.runnerOperations || {}).length, 0);
+  const registry = protocol.assertContractTargetRegistryPosture(snapshot.result.targetRegistryPostures[0]);
+  const slot = registry.slotPostures.find((entry) => entry.slotRef === 'slot:execution-fulfillment');
+  assert.equal(registry.state, protocol.FABRIC.CONTRACT_TARGET_REGISTRY_STATE.BLOCKED);
+  assert.equal(slot.state, protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.BLOCKED);
+  assert.equal(slot.blockedReasons[0], 'runtimeRunnerBridge:hostAdapterMissing');
+});
+
+test('runtime marks bridge-only execution fulfillment as fallback posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await send(runtime.port, {
+    type: 'runtime.runner.bridge.posture.put',
+    posture: {
+      kind: 'runtime.runner.bridge.posture',
+      bridgeRef: 'constitute-ui/runtime-runner-bridge@0.1.0',
+      state: 'idle',
+      runtimeRef: 'runtime:test',
+      adapterRef: 'adapter:host-runner:native',
+      blockedReasons: [],
+      safeFacts: { hostAdapterRegistered: true },
+      observedAt: Date.now(),
+    },
+  });
+
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  const registry = protocol.assertContractTargetRegistryPosture(snapshot.result.targetRegistryPostures[0]);
+  const slot = registry.slotPostures.find((entry) => entry.slotRef === 'slot:execution-fulfillment');
+  assert.equal(slot.state, protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED);
+  assert.equal(slot.selectedFulfillmentRef, 'adapter:host-runner:native');
+  assert.equal(slot.safeFacts.hostAdapterRegistered, true);
+  assert.equal(slot.safeFacts.primaryControl, 'legacyBridgeFallback');
+  assert.equal(slot.safeFacts.legacyPathState, 'activeFallback');
+  assert.equal(slot.safeFacts.selectedProjectionCount, 0);
+});
 
 function gatewayAssociationPosture(now, gatewayPk) {
   const shortGatewayPk = gatewayPk.slice(0, 12);
@@ -1218,6 +1658,36 @@ test('app intent RPCs enqueue CAAC swarm frames', async () => {
   assert.equal(streamActivation.interactionId.includes('runtime.stream.open'), true);
 });
 
+test('runtime prepares stream fulfillment binding before browser offer', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+
+  const prepared = await send(runtime.port, {
+    type: 'runtime.stream.prepare',
+    payload: {
+      sourceId: 'cam-1',
+      sourceIds: ['cam-1'],
+      capabilityRef: protocol.SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+      transport: 'webrtc',
+    },
+  });
+
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.result.kind, 'runtime.stream.prepare');
+  assert.equal(prepared.result.state, 'prepared');
+  assert.match(prepared.result.nonce, /^stream-/);
+  assert.match(prepared.result.sessionId, /^nvr-preview-stream-/);
+  assert.equal(
+    prepared.result.fulfillmentSessionId,
+    `fulfillment:preview:${prepared.result.sessionId}`,
+  );
+  assert.match(prepared.result.intentId, /^stream-intent-/);
+  assert.deepEqual(prepared.result.sourceIds, ['cam-1']);
+
+  const queue = await send(runtime.port, { type: 'swarm.queue.get' });
+  assert.equal(Object.keys(queue.result).length, 0);
+});
+
 test('runtime capability resolve returns local contract posture without routing a swarm frame', async () => {
   const runtime = loadRuntime(new Map());
   await attach(runtime.port);
@@ -1494,6 +1964,7 @@ test('runtime reduces service media transport observations into stream fulfillme
     observationId: 'media-observation-service-failed',
     pathId: 'nvr-preview-service-observation:path:browserWebRtc',
     sessionId: 'nvr-preview-service-observation',
+    fulfillmentSessionId: 'fulfillment:preview:nvr-preview-service-observation',
     activationId: 'activation-service-observation',
     routePromiseId: 'route-promise-service-observation',
     participantRef: `service:${SERVICE_PK}`,
@@ -1537,6 +2008,7 @@ test('runtime reduces service media transport observations into stream fulfillme
   assert.equal(received.ok, true, JSON.stringify(received));
   const posture = received.result.mediaFulfillment['nvr-preview-service-observation'];
   assert.equal(posture.state, protocol.SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED);
+  assert.equal(posture.fulfillmentSessionId, 'fulfillment:preview:nvr-preview-service-observation');
   assert.equal(posture.postureState, 'mediaPathBlocked');
   assert.equal(posture.serviceRef, `service:${SERVICE_PK}`);
   assert.deepEqual(posture.blockedReasons, ['peerConnectionFailed']);
@@ -1555,6 +2027,7 @@ test('runtime accepts browser media transport observations as shared stream post
       observationId: 'media-observation-browser-stalled',
       pathId: 'nvr-preview-browser-observation:path:browserWebRtc',
       sessionId: 'nvr-preview-browser-observation',
+      fulfillmentSessionId: 'fulfillment:preview:nvr-preview-browser-observation',
       activationId: 'activation-browser-observation',
       routePromiseId: 'route-promise-browser-observation',
       participantRef: 'adapter:media-webrtc:browser',
@@ -1579,6 +2052,7 @@ test('runtime accepts browser media transport observations as shared stream post
 
   assert.equal(response.ok, true, JSON.stringify(response));
   assert.equal(response.result.state, protocol.SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED);
+  assert.equal(response.result.fulfillmentSessionId, 'fulfillment:preview:nvr-preview-browser-observation');
   assert.equal(response.result.postureState, 'mediaPathBlocked');
   assert.equal(response.result.adapterRef, 'adapter:media-webrtc:browser');
   assert.deepEqual(response.result.blockedReasons, ['inboundRtpStalled']);
@@ -3937,6 +4411,19 @@ test('runtime stream activation derives route fields from retained service catal
 test('runtime service catalog exposes service registry materialization posture', async () => {
   const runtime = loadRuntime(new Map());
   await attach(runtime.port);
+  await send(runtime.port, {
+    type: 'runtime.runner.bridge.posture.put',
+    posture: {
+      kind: 'runtime.runner.bridge.posture',
+      bridgeRef: 'constitute-ui/runtime-runner-bridge@0.1.0',
+      state: 'idle',
+      runtimeRef: 'runtime:test',
+      adapterRef: 'adapter:host-runner:native',
+      blockedReasons: [],
+      safeFacts: { hostAdapterRegistered: true },
+      observedAt: Date.now(),
+    },
+  });
   await seedNvrServiceCatalog(runtime.port);
   await seedNvrEdgeDirectory(runtime.port);
 
@@ -3956,6 +4443,7 @@ test('runtime service catalog exposes service registry materialization posture',
 test('runtime snapshot exposes selected target source and fabric records', async () => {
   const runtime = loadRuntime(new Map());
   await attach(runtime.port);
+  const executionSelection = await seedRuntimeExecutionFulfillmentSelection(runtime.port);
   await seedNvrServiceCatalog(runtime.port);
   await seedNvrEdgeDirectory(runtime.port);
 
@@ -3985,6 +4473,17 @@ test('runtime snapshot exposes selected target source and fabric records', async
     registry.slotPostures.some((slot) => (
       slot.slotRef === 'slot:native-client'
       && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.NOT_REQUIRED
+    )),
+    true,
+  );
+  assert.equal(
+    registry.slotPostures.some((slot) => (
+      slot.slotRef === 'slot:execution-fulfillment'
+      && slot.state === protocol.FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+      && slot.selectedFulfillmentRef === executionSelection.fulfillmentSessionProjection.projectionRef
+      && slot.safeFacts.primaryControl === 'manifestSessionProjection'
+      && slot.safeFacts.legacyPathState === 'fallbackOnly'
+      && slot.adapterRefs.includes('adapter:host-runner:native')
     )),
     true,
   );
