@@ -5,6 +5,7 @@ import {
   SERVICE_REGISTRY,
   SWARM,
   STREAM_SESSION_LIFECYCLE_PHASE,
+  RUNNER,
   applyProjectionDelta,
   assertActionAuthorityExercise,
   assertActionAuthorityGrant,
@@ -14,6 +15,7 @@ import {
   assertAuthorityGrantRevocationPosture,
   assertAuthorityMultiIdentityProof,
   assertAuthorityRootOperation,
+  assertCarrierEdgeSessionEvidence,
   assertEventAdmissionEnvelope,
   assertEventFabricAccessClass,
   assertEventFabricProcessorContract,
@@ -31,6 +33,7 @@ import {
   assertHostFabricFulfillmentPlan,
   assertHostFabricMemberContribution,
   assertLifecyclePlanPosture,
+  assertOperationInstancePosture,
   assertResolvedMemberRef,
   assertSubstrateAssociationHandoff,
   assertProjectionRepairPosture,
@@ -43,6 +46,10 @@ import {
   assertMediaFulfillmentEvidence,
   assertMediaTransportObservation,
   assertContributionLifecycle,
+  assertFulfillmentSession,
+  assertRunnerOperation,
+  assertRunnerHostFulfillmentPosture,
+  assertRuntimeFulfillmentSessionProjection,
   assertStreamSessionCandidate,
   assertSubscriptionContract,
   assertSwarmActivation,
@@ -60,7 +67,7 @@ import {
 } from "constitute-protocol";
 import { deriveRuntimeShellState } from "./runtime-shell-state.js";
 
-const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 57 });
+const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 61 });
 const RUNTIME_WORKER_BUILD_ID = `runtime-${RUNTIME_VERSION.major}.${RUNTIME_VERSION.minor}`;
 const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
 const RUNTIME_STATE_KEY = `runtime.shared.state.v${RUNTIME_VERSION.major}`;
@@ -76,6 +83,11 @@ const RUNTIME_AUTHORITY_RECORDS_REDUCE = 'runtime.authority.records.reduce';
 const RUNTIME_MEDIA_TRANSPORT_PROFILE_GET = 'runtime.media.transport.profile.get';
 const RUNTIME_MEDIA_TRANSPORT_OBSERVATION_PUT = 'runtime.media.transport.observation.put';
 const RUNTIME_MEDIA_FULFILLMENT_EVIDENCE_PUT = 'runtime.media.fulfillment.evidence.put';
+const RUNTIME_RUNNER_OPERATION_SUBMIT = 'runtime.runner.operation.submit';
+const RUNTIME_RUNNER_HOST_FULFILLMENT_PUT = 'runtime.runner.host.fulfillment.put';
+const RUNTIME_RUNNER_BRIDGE_POSTURE_PUT = 'runtime.runner.bridge.posture.put';
+const RUNTIME_FULFILLMENT_SESSION_PROJECTION_PUT = 'runtime.fulfillment-session.projection.put';
+const RUNTIME_FULFILLMENT_SESSION_PROJECTION_GET = 'runtime.fulfillment-session.projection.get';
 const RUNTIME_RESOURCE_SAMPLE_GET = 'runtime.resource.sample.get';
 const RUNTIME_RESOURCE_PROFILE_GET = 'runtime.resource.profile.get';
 const RUNTIME_RESOURCE_PROFILE_PUT = 'runtime.resource.profile.put';
@@ -90,6 +102,12 @@ const SWARM_EDGE_TEST_RECEIVE = 'swarm.edge.test.receive';
 const SWARM_EDGE_SENT_GET = 'swarm.edge.sent.get';
 const SWARM_EDGE_ACK = 'swarm.edge.ack';
 const SWARM_EDGE_REJECT = 'swarm.edge.reject';
+const CARRIER_EDGE_RUNTIME_ADAPTER_REF = 'adapter:runtime-worker:websocket';
+const CARRIER_EDGE_RUNTIME_SELECTION_REF = 'carrier-edge-selection:runtime:swarm-edge';
+const CARRIER_EDGE_EVIDENCE_TTL_MS = 30_000;
+const CARRIER_EDGE_RETRY_BASE_MS = 1_500;
+const CARRIER_EDGE_RETRY_MAX_MS = 30_000;
+const CARRIER_EDGE_RETRY_RESET_MS = 120_000;
 const CONTRIBUTION_LIFECYCLE_LIMIT = 100;
 const RUNTIME_DIAGNOSTICS_SUBSCRIBE = 'runtime.diagnostics.subscribe';
 const RUNTIME_DIAGNOSTICS_UNSUBSCRIBE = 'runtime.diagnostics.unsubscribe';
@@ -166,6 +184,7 @@ const RUNTIME_APP_INTENT = Object.freeze({
   CAPABILITY_RESOLVE: 'runtime.capability.resolve',
   CHANNEL_RESOLVE: 'runtime.channel.resolve',
   PROJECTION_OBSERVE: 'runtime.projection.observe',
+  STREAM_PREPARE: 'runtime.stream.prepare',
   STREAM_OPEN: 'runtime.stream.open',
   STREAM_CONTROL: 'runtime.stream.control',
   STREAM_CLOSE: 'runtime.stream.close',
@@ -440,6 +459,9 @@ const outboundSwarmFrames = new Map();
 const serviceAdmissionTimeoutTimers = new Map();
 const mediaFulfillmentPostures = new Map();
 const streamRecoveryPostures = new Map();
+const runnerOperationDispatches = new Map();
+const runtimeRunnerBridgePostures = new Map();
+const runtimeFulfillmentSessionProjections = new Map();
 const runtimeEvents = [];
 const diagnosticLoggingSubscriberIds = new Set();
 const diagnosticAdmissionCounters = {
@@ -498,6 +520,22 @@ const swarmEdge = {
   repairRequests: [],
   routeObservations: [],
   contributionLifecycles: [],
+  retryPosture: {
+    state: 'idle',
+    attempts: 0,
+    delayMs: 0,
+    nextRetryAt: 0,
+    lastFailureAt: 0,
+    lastFailureReason: '',
+    targetRef: '',
+    resetAfter: 0,
+  },
+  releasePosture: {
+    state: 'released',
+    releasedAt: 0,
+    closedAt: 0,
+    reason: 'initial',
+  },
 };
 let liveSwarmEdgeAttachInFlight = null;
 let liveSwarmEdgeAttachInFlightTarget = '';
@@ -3032,6 +3070,81 @@ function touchRuntime() {
   runtimeUpdatedAt = nowMs();
 }
 
+function runnerOperationDispatchObject() {
+  const out = {};
+  for (const [key, dispatch] of runnerOperationDispatches.entries()) {
+    out[key] = safeClone(dispatch);
+    const operationId = String(dispatch?.operationId || dispatch?.runnerOperation?.operationId || '').trim();
+    if (operationId && !out[operationId]) out[operationId] = out[key];
+  }
+  return out;
+}
+
+function runtimeRunnerBridgePostureObject() {
+  const out = {};
+  for (const [key, posture] of runtimeRunnerBridgePostures.entries()) {
+    out[key] = safeClone(posture);
+    const bridgeRef = String(posture?.bridgeRef || '').trim();
+    if (bridgeRef && !out[bridgeRef]) out[bridgeRef] = out[key];
+  }
+  return out;
+}
+
+function runtimeFulfillmentSessionProjectionStoreKey(projection) {
+  return String(projection?.projectionRef || projection?.sessionId || '').trim();
+}
+
+function runtimeFulfillmentSessionProjectionObject() {
+  const out = {};
+  for (const [key, projection] of runtimeFulfillmentSessionProjections.entries()) {
+    const cloned = safeClone(projection);
+    out[key] = cloned;
+    const projectionRef = String(projection?.projectionRef || '').trim();
+    if (projectionRef && !out[projectionRef]) out[projectionRef] = cloned;
+    const sessionId = String(projection?.sessionId || '').trim();
+    if (sessionId && !out[sessionId]) out[sessionId] = cloned;
+  }
+  return out;
+}
+
+function appendProjectionIndex(index, family, key, projectionRef) {
+  const normalizedKey = String(key || '').trim();
+  const normalizedProjectionRef = String(projectionRef || '').trim();
+  if (!normalizedKey || !normalizedProjectionRef) return;
+  const bucket = index[family] || {};
+  const refs = new Set(normalizeArray(bucket[normalizedKey]).map((entry) => String(entry || '').trim()).filter(Boolean));
+  refs.add(normalizedProjectionRef);
+  bucket[normalizedKey] = Array.from(refs).sort();
+  index[family] = bucket;
+}
+
+function runtimeFulfillmentSessionProjectionIndex() {
+  const index = {
+    bySession: {},
+    byManifest: {},
+    byParentIntent: {},
+    bySubject: {},
+    byHost: {},
+    byRunner: {},
+    byStorageAvailability: {},
+    byAdapterDebt: {},
+  };
+  for (const projection of runtimeFulfillmentSessionProjections.values()) {
+    const projectionRef = String(projection?.projectionRef || '').trim();
+    appendProjectionIndex(index, 'bySession', projection?.queryKeys?.bySession || projection?.sessionId, projectionRef);
+    appendProjectionIndex(index, 'byManifest', projection?.queryKeys?.byManifest || projection?.lifecycleManifestRef, projectionRef);
+    appendProjectionIndex(index, 'byParentIntent', projection?.queryKeys?.byParentIntent || projection?.parentIntentRef, projectionRef);
+    appendProjectionIndex(index, 'bySubject', projection?.queryKeys?.bySubject || projection?.subjectRef, projectionRef);
+    appendProjectionIndex(index, 'byHost', projection?.queryKeys?.byHost || projection?.hostRef, projectionRef);
+    appendProjectionIndex(index, 'byRunner', projection?.queryKeys?.byRunner || projection?.runnerRef, projectionRef);
+    for (const ref of normalizeArray(projection?.queryKeys?.byStorageAvailability || projection?.storageAvailabilityRefs)) {
+      appendProjectionIndex(index, 'byStorageAvailability', ref, projectionRef);
+    }
+    appendProjectionIndex(index, 'byAdapterDebt', projection?.queryKeys?.byAdapterDebt || projection?.adapterDebtState, projectionRef);
+  }
+  return index;
+}
+
 function retainedProjectionObject() {
   const out = {};
   for (const [key, projection] of retainedProjections.entries()) {
@@ -3066,6 +3179,7 @@ function swarmQueueObject() {
 }
 
 function edgeSnapshot() {
+  const carrierEdge = carrierEdgeSessionEvidenceObject();
   return {
     mode: swarmEdge.mode,
     connected: swarmEdge.connected,
@@ -3079,6 +3193,10 @@ function edgeSnapshot() {
     repairRequests: swarmEdge.repairRequests.map((entry) => safeClone(entry)),
     routeObservations: swarmEdge.routeObservations.map((entry) => safeClone(entry)),
     contributionLifecycles: swarmEdge.contributionLifecycles.map((entry) => safeClone(entry)),
+    carrierEdge,
+    carrierEdgeSessionEvidence: carrierEdge,
+    retryPosture: safeClone(swarmEdge.retryPosture || {}),
+    releasePosture: safeClone(swarmEdge.releasePosture || {}),
   };
 }
 
@@ -4805,12 +4923,15 @@ function fulfillmentEvidenceFromTransportObservation(record, openedFrame) {
   const fulfillmentState = mediaFulfillmentStateForTransportObservation(record);
   const safeFacts = {
     observationId: String(record.observationId || '').trim(),
+    pathId: String(record.pathId || '').trim(),
+    fulfillmentSessionId: String(record.fulfillmentSessionId || '').trim(),
     participantRole: String(record.participantRole || '').trim(),
     observationState: String(record.state || '').trim(),
     connectionState: String(record.connectionState || '').trim(),
     iceConnectionState: String(record.iceConnectionState || '').trim(),
     selectedPairState: String(record.selectedPairState || '').trim(),
     inboundRtpState: String(record.inboundRtpState || '').trim(),
+    trackState: String(record.trackState || '').trim(),
     renderState: String(record.renderState || '').trim(),
     reason: String(record.reason || '').trim(),
   };
@@ -4819,6 +4940,7 @@ function fulfillmentEvidenceFromTransportObservation(record, openedFrame) {
     evidenceId: `media-observation:${String(record.observationId || openedFrame?.frameId || randomOpaqueId('media-observation')).trim()}`,
     evidenceKind: SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.TRANSPORT_STATE,
     state: fulfillmentState,
+    fulfillmentSessionId: String(record.fulfillmentSessionId || '').trim() || undefined,
     sessionId: String(record.sessionId || '').trim(),
     activationId: String(record.activationId || '').trim() || undefined,
     correlationId: String(openedFrame?.correlationId || openedFrame?.frameId || '').trim() || undefined,
@@ -4846,6 +4968,8 @@ function reduceMediaTransportObservationRecord(observation, openedFrame = {}) {
     level: posture.state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED ? 'warn' : 'info',
     frameId: String(openedFrame?.frameId || '').trim(),
     correlationId: String(openedFrame?.correlationId || '').trim(),
+    fulfillmentSessionId: String(observation.fulfillmentSessionId || posture.fulfillmentSessionId || '').trim(),
+    pathId: String(observation.pathId || '').trim(),
     sessionId: posture.sessionId,
     activationId: posture.activationId,
     routePromiseId: String(observation.routePromiseId || '').trim(),
@@ -5265,6 +5389,13 @@ async function handleEdgeWireMessage(raw) {
   if (type === 'swarm.edge.accept') {
     swarmEdge.sessionId = String(message?.accept?.sessionId || message?.sessionId || '').trim();
     swarmEdge.connected = true;
+    resetCarrierEdgeRetry('accepted');
+    swarmEdge.releasePosture = {
+      state: 'held',
+      releasedAt: 0,
+      closedAt: 0,
+      reason: 'accepted',
+    };
     clearRuntimeControlPlaneBusy();
     const acceptedZoneScope = normalizeServiceZoneScope(message?.accept?.zoneScope || message?.accept?.zone_scope || message?.zoneScope || message?.zone_scope);
     if (acceptedZoneScope) swarmEdge.zoneScope = acceptedZoneScope;
@@ -5310,10 +5441,18 @@ async function handleEdgeWireMessage(raw) {
     return;
   }
   if (type === 'swarm.edge.close') {
+    const retryPosture = recordCarrierEdgeFailure('serviceClose', {
+      endpoint: swarmEdge.endpoint,
+      memberRef: swarmEdge.memberRef,
+      zoneScope: swarmEdge.zoneScope,
+    });
     swarmEdge.connected = false;
     swarmEdge.sessionId = '';
     recordRuntimeEvent('adapter.edge.closed', {
       reasonCode: String(message?.reasonCode || '').trim(),
+      retryAt: retryPosture.nextRetryAt,
+      retryInMs: retryPosture.delayMs,
+      attempts: retryPosture.attempts,
     });
     touchRuntime();
     broadcast({ type: 'swarm.edge.close', reasonCode: String(message?.reasonCode || '').trim() });
@@ -5353,6 +5492,193 @@ function edgeEndpointDiagnosticFacts(endpoint) {
   } catch {
     return {};
   }
+}
+
+function referenceToken(value, fallback = 'unknown') {
+  const token = String(value || '').trim()
+    .replace(/[^a-zA-Z0-9:._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return token || fallback;
+}
+
+function carrierEdgeTargetRef(endpoint, memberRef, zoneScope) {
+  return [
+    referenceToken(endpoint, 'endpoint'),
+    referenceToken(memberRef, 'member'),
+    referenceToken(stableJson(zoneScope || {}), 'zone'),
+  ].join('|');
+}
+
+function carrierEdgeRetryDelayMs(attempts) {
+  const step = Math.max(0, Number(attempts || 1) - 1);
+  const delay = CARRIER_EDGE_RETRY_BASE_MS * (2 ** Math.min(step, 6));
+  return Math.min(CARRIER_EDGE_RETRY_MAX_MS, delay);
+}
+
+function resetCarrierEdgeRetry(reason = 'accepted') {
+  swarmEdge.retryPosture = {
+    state: 'idle',
+    attempts: 0,
+    delayMs: 0,
+    nextRetryAt: 0,
+    lastFailureAt: Number(swarmEdge.retryPosture?.lastFailureAt || 0) || 0,
+    lastFailureReason: String(reason || '').trim(),
+    targetRef: '',
+    resetAfter: 0,
+  };
+}
+
+function recordCarrierEdgeFailure(reason, { endpoint = swarmEdge.endpoint, memberRef = swarmEdge.memberRef, zoneScope = swarmEdge.zoneScope } = {}) {
+  const observedAt = nowMs();
+  const targetRef = carrierEdgeTargetRef(endpoint, memberRef, zoneScope);
+  const previous = swarmEdge.retryPosture && typeof swarmEdge.retryPosture === 'object' ? swarmEdge.retryPosture : {};
+  const sameTarget = String(previous.targetRef || '') === targetRef && Number(previous.resetAfter || 0) > observedAt;
+  const attempts = sameTarget ? Number(previous.attempts || 0) + 1 : 1;
+  const delayMs = carrierEdgeRetryDelayMs(attempts);
+  const nextRetryAt = observedAt + delayMs;
+  swarmEdge.retryPosture = {
+    state: 'backoff',
+    attempts,
+    delayMs,
+    nextRetryAt,
+    lastFailureAt: observedAt,
+    lastFailureReason: String(reason || 'carrierEdgeFailure').trim() || 'carrierEdgeFailure',
+    targetRef,
+    resetAfter: observedAt + CARRIER_EDGE_RETRY_RESET_MS,
+  };
+  swarmEdge.releasePosture = {
+    state: 'released',
+    releasedAt: observedAt,
+    closedAt: observedAt,
+    reason: String(reason || 'carrierEdgeFailure').trim() || 'carrierEdgeFailure',
+  };
+  return safeClone(swarmEdge.retryPosture);
+}
+
+function carrierEdgeBackoffBlock(targetRef) {
+  const retry = swarmEdge.retryPosture && typeof swarmEdge.retryPosture === 'object' ? swarmEdge.retryPosture : {};
+  const now = nowMs();
+  if (
+    String(retry.state || '') === 'backoff'
+    && String(retry.targetRef || '') === targetRef
+    && Number(retry.nextRetryAt || 0) > now
+  ) {
+    return {
+      blocked: true,
+      retryAt: Number(retry.nextRetryAt || 0),
+      retryInMs: Math.max(0, Number(retry.nextRetryAt || 0) - now),
+      attempts: Number(retry.attempts || 0),
+      reason: String(retry.lastFailureReason || 'carrierEdgeBackoff'),
+    };
+  }
+  return { blocked: false };
+}
+
+function socketReadyStateName(socket) {
+  const state = Number(socket?.readyState ?? -1);
+  if (typeof WebSocket === 'function') {
+    if (state === WebSocket.CONNECTING) return 'connecting';
+    if (state === WebSocket.OPEN) return 'connected';
+    if (state === WebSocket.CLOSING) return 'closing';
+    if (state === WebSocket.CLOSED) return 'closed';
+  }
+  if (state === 0) return 'connecting';
+  if (state === 1) return 'connected';
+  if (state === 2) return 'closing';
+  if (state === 3) return 'closed';
+  return '';
+}
+
+function carrierEdgeBackpressureState() {
+  const queuedCount = outboundSwarmFrames.size;
+  if (queuedCount >= 100) return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.SATURATED;
+  if (carrierEdgeBackoffBlock(String(swarmEdge.retryPosture?.targetRef || '')).blocked) {
+    return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.DEGRADED;
+  }
+  if (queuedCount > 0 || swarmEdge.rejections.length > 0 || swarmEdge.repairRequests.length > 0) {
+    return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.DEGRADED;
+  }
+  return SWARM.CARRIER_EDGE_BACKPRESSURE_STATE.CLEAR;
+}
+
+function carrierEdgeSessionState() {
+  if (swarmEdge.mode === 'pendingAuthority') return SWARM.CARRIER_EDGE_SESSION_STATE.BLOCKED;
+  if (swarmEdge.connected === true) return SWARM.CARRIER_EDGE_SESSION_STATE.OPEN;
+  const readyState = socketReadyStateName(swarmEdge.socket);
+  if (readyState === 'connecting') return SWARM.CARRIER_EDGE_SESSION_STATE.OPENING;
+  if (readyState === 'closing') return SWARM.CARRIER_EDGE_SESSION_STATE.CLOSING;
+  if (carrierEdgeBackoffBlock(String(swarmEdge.retryPosture?.targetRef || '')).blocked) {
+    return SWARM.CARRIER_EDGE_SESSION_STATE.RECONNECTING;
+  }
+  if (swarmEdge.mode === 'live' && swarmEdge.socket) return SWARM.CARRIER_EDGE_SESSION_STATE.RECONNECTING;
+  return SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED;
+}
+
+function carrierEdgeSessionEvidenceObject() {
+  const observedAt = nowMs();
+  const state = carrierEdgeSessionState();
+  const socketState = socketReadyStateName(swarmEdge.socket);
+  const participantRef = String(swarmEdge.memberRef || '').trim()
+    || (swarmEdge.mode === 'pendingAuthority' ? 'participant:runtime-authority:pending' : 'participant:runtime:self');
+  const sessionRef = String(swarmEdge.sessionId || '').trim()
+    || `${String(swarmEdge.mode || 'detached').trim() || 'detached'}:${participantRef}`;
+  const blockedReasons = [];
+  if (state === SWARM.CARRIER_EDGE_SESSION_STATE.BLOCKED) {
+    blockedReasons.push(swarmEdge.mode === 'pendingAuthority' ? 'missingRuntimeAuthorityMemberRef' : 'carrierEdgeBlocked');
+  }
+  const retryBlock = carrierEdgeBackoffBlock(String(swarmEdge.retryPosture?.targetRef || ''));
+  if (retryBlock.blocked) blockedReasons.push('carrierEdgeBackoff');
+  const retryPosture = {
+    mode: String(swarmEdge.mode || '').trim() || 'detached',
+    attachInFlight: Boolean(liveSwarmEdgeAttachInFlight),
+    queuedCount: outboundSwarmFrames.size,
+    ...(swarmEdge.retryPosture && typeof swarmEdge.retryPosture === 'object'
+      ? safeClone(swarmEdge.retryPosture)
+      : {}),
+    ...(retryBlock.blocked ? {
+      retryAt: retryBlock.retryAt,
+      retryInMs: retryBlock.retryInMs,
+    } : {}),
+  };
+  const releasePosture = swarmEdge.releasePosture && typeof swarmEdge.releasePosture === 'object'
+    ? safeClone(swarmEdge.releasePosture)
+    : { state: state === SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED ? 'released' : 'held' };
+  if (state !== SWARM.CARRIER_EDGE_SESSION_STATE.CLOSED && releasePosture.state === 'released') {
+    releasePosture.state = 'held';
+  }
+  const record = {
+    kind: SWARM.RECORD_KIND.CARRIER_EDGE_SESSION_EVIDENCE,
+    evidenceId: `carrier-edge-evidence:runtime:${runtimeSessionId}:swarm-edge`,
+    selectionRef: CARRIER_EDGE_RUNTIME_SELECTION_REF,
+    edgeSessionRef: `carrier-edge-session:${referenceToken(sessionRef, 'detached')}`,
+    adapterRef: CARRIER_EDGE_RUNTIME_ADAPTER_REF,
+    adapterKind: SWARM.CARRIER_EDGE_ADAPTER_KIND.WEB_SOCKET,
+    participantRef,
+    state,
+    connectionState: retryBlock.blocked ? 'backoff' : (swarmEdge.connected ? 'connected' : (socketState || 'disconnected')),
+    backpressureState: carrierEdgeBackpressureState(),
+    retryPosture,
+    releasePosture,
+    safeFacts: {
+      mode: String(swarmEdge.mode || '').trim() || 'detached',
+      connected: swarmEdge.connected === true,
+      socketState: socketState || 'unavailable',
+      queuedCount: outboundSwarmFrames.size,
+      sentCount: swarmEdge.sentFrames.length,
+      rejectionCount: swarmEdge.rejections.length,
+      repairRequestCount: swarmEdge.repairRequests.length,
+      retryState: String(retryPosture.state || '').trim(),
+      retryInMs: Number(retryPosture.retryInMs || 0) || 0,
+      releaseState: String(releasePosture.state || '').trim(),
+    },
+    evidenceRefs: [
+      `runtime:${RUNTIME_WORKER_BUILD_ID}`,
+    ],
+    blockedReasons,
+    observedAt,
+    expiresAt: observedAt + CARRIER_EDGE_EVIDENCE_TTL_MS,
+  };
+  return safeClone(assertCarrierEdgeSessionEvidence(record));
 }
 
 async function attachLiveSwarmEdge(message) {
@@ -5415,6 +5741,36 @@ async function attachLiveSwarmEdge(message) {
   }
   const requestedZoneScope = appIntentZoneScope(source);
   const attachTarget = `${socketEndpoint}|${memberRef}|${stableJson(requestedZoneScope)}`;
+  const retryTargetRef = carrierEdgeTargetRef(socketEndpoint, memberRef, requestedZoneScope);
+  const retryBlock = carrierEdgeBackoffBlock(retryTargetRef);
+  if (retryBlock.blocked) {
+    const blockedReason = 'carrierEdgeBackoff';
+    recordRuntimeEvent('adapter.edge.attach.blocked', {
+      level: 'warn',
+      state: 'reconnecting',
+      blockedReason,
+      retryable: true,
+      retryAt: retryBlock.retryAt,
+      retryInMs: retryBlock.retryInMs,
+      attempts: retryBlock.attempts,
+      failureReason: retryBlock.reason,
+      ...edgeEndpointDiagnosticFacts(socketEndpoint),
+      memberRef,
+      zoneScope: requestedZoneScope,
+    });
+    touchRuntime();
+    broadcastSnapshot();
+    return {
+      ok: false,
+      error: `carrier edge backoff active; retry in ${retryBlock.retryInMs}ms`,
+      state: 'reconnecting',
+      blockedReason,
+      retryable: true,
+      retryAt: retryBlock.retryAt,
+      retryInMs: retryBlock.retryInMs,
+      result: edgeSnapshot(),
+    };
+  }
   if (liveSwarmEdgeAttachInFlight && liveSwarmEdgeAttachInFlightTarget === attachTarget) {
     return await liveSwarmEdgeAttachInFlight;
   }
@@ -5458,6 +5814,12 @@ async function attachLiveSwarmEdgeResolved(source, resolved) {
   swarmEdge.sessionId = '';
   swarmEdge.memberRef = hello.memberRef;
   swarmEdge.zoneScope = safeClone(hello.zoneScope);
+  swarmEdge.releasePosture = {
+    state: 'held',
+    releasedAt: 0,
+    closedAt: 0,
+    reason: 'attach',
+  };
   const socket = new WebSocket(socketEndpoint);
   swarmEdge.socket = socket;
   socket.onopen = () => {
@@ -5480,6 +5842,12 @@ async function attachLiveSwarmEdgeResolved(source, resolved) {
     broadcastSnapshot();
   };
   socket.onclose = (event) => {
+    const closeZoneScope = safeClone(swarmEdge.zoneScope || hello.zoneScope);
+    const retryPosture = recordCarrierEdgeFailure('websocketClosed', {
+      endpoint: socketEndpoint,
+      memberRef: hello.memberRef,
+      zoneScope: closeZoneScope,
+    });
     swarmEdge.connected = false;
     markRuntimeControlPlaneBusy(3000);
     swarmEdge.sessionId = '';
@@ -5493,6 +5861,9 @@ async function attachLiveSwarmEdgeResolved(source, resolved) {
       closeReason: String(event?.reason || '').trim(),
       wasClean: event?.wasClean === true,
       zoneScope: hello.zoneScope,
+      retryAt: retryPosture.nextRetryAt,
+      retryInMs: retryPosture.delayMs,
+      attempts: retryPosture.attempts,
     });
     broadcast({ type: 'swarm.edge.closed', edge: edgeSnapshot() });
     broadcastSnapshot();
@@ -5611,6 +5982,101 @@ function isRuntimeStreamIntent(method) {
   return method === RUNTIME_APP_INTENT.STREAM_OPEN
     || method === RUNTIME_APP_INTENT.STREAM_CONTROL
     || method === RUNTIME_APP_INTENT.STREAM_CLOSE;
+}
+
+function runtimeStreamSessionIdFromNonce(nonce) {
+  const suffix = String(nonce || '')
+    .split('')
+    .map((ch) => /[A-Za-z0-9_-]/.test(ch) ? ch : '-')
+    .join('')
+    .replace(/^-+|-+$/g, '');
+  return `nvr-preview-${suffix || randomOpaqueId('stream')}`;
+}
+
+function runtimeStreamFulfillmentRole(method, intent) {
+  const baseline = streamServiceContractBaseline(method, intent);
+  const capability = String(intent?.capabilityRef || intent?.capability || appIntentCapability(method, intent)).trim();
+  if (baseline?.service === NVR_SERVICE_ID || capability === SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW) {
+    return 'preview';
+  }
+  return 'stream';
+}
+
+function runtimeFulfillmentSessionIdForStream(method, intent, sessionId) {
+  return `fulfillment:${runtimeStreamFulfillmentRole(method, intent)}:${sessionId}`;
+}
+
+function refSafeToken(value, fallback = 'ref') {
+  const token = String(value || '')
+    .split('')
+    .map((ch) => /[A-Za-z0-9._-]/.test(ch) ? ch : '-')
+    .join('')
+    .replace(/^-+|-+$/g, '');
+  return token || fallback;
+}
+
+function runtimeStreamSelectedMethodRef(method) {
+  if (method === RUNTIME_APP_INTENT.STREAM_PREPARE) return RUNTIME_APP_INTENT.STREAM_OPEN;
+  return method;
+}
+
+function runtimeStreamOperationClassRef(method) {
+  const selectedMethod = runtimeStreamSelectedMethodRef(method);
+  if (selectedMethod === RUNTIME_APP_INTENT.STREAM_OPEN) return 'operation-class:stream-open';
+  if (selectedMethod === RUNTIME_APP_INTENT.STREAM_CONTROL) return 'operation-class:stream-control';
+  if (selectedMethod === RUNTIME_APP_INTENT.STREAM_CLOSE) return 'operation-class:stream-close';
+  return `operation-class:${refSafeToken(selectedMethod, 'stream')}`;
+}
+
+function runtimeStreamOperationRef(method, intent, sessionId) {
+  const selectedMethod = runtimeStreamSelectedMethodRef(method);
+  const role = runtimeStreamFulfillmentRole(selectedMethod, intent);
+  const suffix = refSafeToken(sessionId || intent?.sessionId || intent?.nonce, 'stream');
+  if (selectedMethod === RUNTIME_APP_INTENT.STREAM_OPEN) return `operation:${role}:runtime-stream-open:${suffix}`;
+  if (selectedMethod === RUNTIME_APP_INTENT.STREAM_CONTROL) return `operation:${role}:runtime-stream-control:${suffix}`;
+  if (selectedMethod === RUNTIME_APP_INTENT.STREAM_CLOSE) return `operation:${role}:runtime-stream-close:${suffix}`;
+  return `operation:${role}:${refSafeToken(selectedMethod, 'stream')}:${suffix}`;
+}
+
+function withRuntimeStreamBinding(method, intent) {
+  if (!isRuntimeStreamIntent(method) && method !== RUNTIME_APP_INTENT.STREAM_PREPARE) {
+    return intent;
+  }
+  const nonce = String(intent?.nonce || '').trim() || randomOpaqueId('stream');
+  const sessionId = String(intent?.sessionId || '').trim() || runtimeStreamSessionIdFromNonce(nonce);
+  const selectedMethod = runtimeStreamSelectedMethodRef(method);
+  const derivedFulfillmentSessionId = runtimeFulfillmentSessionIdForStream(
+    selectedMethod,
+    { ...intent, nonce, sessionId },
+    sessionId,
+  );
+  const explicitFulfillmentSessionId = String(intent?.fulfillmentSessionId || '').trim();
+  if (explicitFulfillmentSessionId && explicitFulfillmentSessionId !== derivedFulfillmentSessionId) {
+    throw new Error('stream fulfillmentSessionId must be allocated by runtime open-intent posture');
+  }
+  const derivedOperationRef = runtimeStreamOperationRef(selectedMethod, { ...intent, nonce, sessionId }, sessionId);
+  const derivedOperationClassRef = runtimeStreamOperationClassRef(selectedMethod);
+  const explicitOperationRef = String(intent?.operationRef || '').trim();
+  const explicitOperationClassRef = String(intent?.operationClassRef || '').trim();
+  const explicitMethodRef = String(intent?.methodRef || '').trim();
+  if (explicitOperationRef && explicitOperationRef !== derivedOperationRef) {
+    throw new Error('stream operationRef must be allocated by runtime open-intent posture');
+  }
+  if (explicitOperationClassRef && explicitOperationClassRef !== derivedOperationClassRef) {
+    throw new Error('stream operationClassRef must match runtime open-intent posture');
+  }
+  if (explicitMethodRef && explicitMethodRef !== selectedMethod) {
+    throw new Error('stream methodRef must match runtime open-intent posture');
+  }
+  return {
+    ...intent,
+    nonce,
+    sessionId,
+    fulfillmentSessionId: derivedFulfillmentSessionId,
+    operationRef: derivedOperationRef,
+    operationClassRef: derivedOperationClassRef,
+    methodRef: selectedMethod,
+  };
 }
 
 function streamServiceContractBaseline(method, intent, derived = null) {
@@ -6198,6 +6664,10 @@ function appIntentActivationParams(method, intent) {
     : intent?.payload && typeof intent.payload === 'object'
       ? safeClone(intent.payload)
       : {};
+  for (const key of ['nonce', 'sessionId', 'fulfillmentSessionId', 'operationRef', 'operationClassRef', 'methodRef']) {
+    const value = String(intent?.[key] || params[key] || '').trim();
+    if (value) params[key] = value;
+  }
   const sourceIds = normalizeArray(intent?.sourceIds || intent?.sources || intent?.offer?.sourceIds || params.sourceIds)
     .concat(String(intent?.sourceId || params.sourceId || '').trim() ? [intent?.sourceId || params.sourceId] : [])
     .map((entry) => String(entry || '').trim())
@@ -6673,6 +7143,7 @@ function streamCandidateEndpointEvidence(candidate) {
 }
 
 function runtimeStreamCandidateRecord(intent, candidatePayload, issuedAt, idx = 0) {
+  const boundIntent = withRuntimeStreamBinding(RUNTIME_APP_INTENT.STREAM_CONTROL, intent || {});
   const candidate = candidatePayload?.candidate && typeof candidatePayload.candidate === 'object'
     ? candidatePayload.candidate
     : candidatePayload;
@@ -6684,8 +7155,9 @@ function runtimeStreamCandidateRecord(intent, candidatePayload, issuedAt, idx = 
         || intent?.candidateId
         || `candidate:${String(intent?.sessionId || intent?.nonce || 'stream').trim()}:${idx}`,
     ).trim(),
-    sessionId: String(intent?.sessionId || candidatePayload?.sessionId || '').trim(),
-    transport: String(intent?.transport || candidatePayload?.transport || 'webrtc').trim() || 'webrtc',
+    sessionId: String(boundIntent.sessionId || candidatePayload?.sessionId || '').trim(),
+    fulfillmentSessionId: String(boundIntent.fulfillmentSessionId || candidatePayload?.fulfillmentSessionId || '').trim(),
+    transport: String(boundIntent.transport || candidatePayload?.transport || 'webrtc').trim() || 'webrtc',
     candidateRole: 'browser',
     actionability: endpoint ? 'usable' : 'blocked',
     ...(endpoint ? { endpoint } : { blockedReason: 'missingCandidateEndpoint' }),
@@ -6694,6 +7166,93 @@ function runtimeStreamCandidateRecord(intent, candidatePayload, issuedAt, idx = 
   };
   assertStreamSessionCandidate(record);
   return record;
+}
+
+function runtimeStreamOperationSubjectRef(intent, sessionId, sourceIds = []) {
+  const sourceRef = String(sourceIds[0] || intent?.sourceId || '').trim();
+  if (sourceRef) return `stream-source:${refSafeToken(sourceRef, 'source')}`;
+  return `stream-session:${refSafeToken(sessionId, 'stream')}`;
+}
+
+function runtimeStreamOpenOperationEvidenceRef(intentId, sessionId) {
+  return `runtime.stream.prepare:${refSafeToken(intentId || sessionId, 'stream-intent')}`;
+}
+
+function runtimeStreamOperationInstancePosture(method, boundIntent, {
+  intentId,
+  sourceIds = [],
+  issuedAt,
+  expiresAt,
+} = {}) {
+  const selectedMethod = runtimeStreamSelectedMethodRef(method);
+  const operationRef = String(boundIntent?.operationRef || '').trim();
+  const operationClassRef = String(boundIntent?.operationClassRef || runtimeStreamOperationClassRef(selectedMethod)).trim();
+  const methodRef = String(boundIntent?.methodRef || selectedMethod).trim();
+  const sessionId = String(boundIntent?.sessionId || '').trim();
+  const fulfillmentSessionRef = String(boundIntent?.fulfillmentSessionId || '').trim();
+  const parentIntentRef = `stream.session.intent:${refSafeToken(intentId || sessionId, 'stream-intent')}`;
+  const evidenceRef = runtimeStreamOpenOperationEvidenceRef(intentId, sessionId);
+  const surfaceBindingRef = `surface-binding:nvr-preview:${refSafeToken(sessionId, 'stream')}`;
+  return assertOperationInstancePosture({
+    kind: SWARM.RECORD_KIND.OPERATION_INSTANCE_POSTURE,
+    operationRef,
+    operationClassRef,
+    methodRef,
+    state: SWARM.OPERATION_POSTURE_STATE.SELECTED,
+    subjectRef: runtimeStreamOperationSubjectRef(boundIntent, sessionId, sourceIds),
+    contractRef: 'contract:nvr-preview@selected',
+    parentIntentRef,
+    fulfillmentSessionRef,
+    roleContributions: [
+      {
+        roleRef: 'role:runtime:operation-binding',
+        contributionRef: `operation-contribution:runtime:${refSafeToken(operationRef, 'stream-open')}`,
+        contributorRef: `runtime:browser-shared-worker:${RUNTIME_WORKER_BUILD_ID}`,
+        contributionType: SWARM.CONTRIBUTION_TYPE.FULFILLMENT,
+        state: SWARM.OPERATION_POSTURE_STATE.SELECTED,
+        required: true,
+        authorityRefs: ['grant:runtime:stream-open'],
+        primitiveRefs: ['primitive:operation.instance.posture', 'primitive:runtime.intent'],
+        capabilityRefs: [appIntentCapability(selectedMethod, boundIntent)],
+        inputRefs: [parentIntentRef],
+        outputRefs: [operationRef, fulfillmentSessionRef].filter(Boolean),
+        evidenceRefs: [evidenceRef],
+        safeFacts: {
+          runtimeAllocatesOperationRefs: true,
+          surfaceSuppliesFlowTruth: false,
+        },
+      },
+      {
+        roleRef: 'role:surface:element-binding',
+        contributionRef: `operation-contribution:surface-binding:${refSafeToken(sessionId, 'stream')}`,
+        contributorRef: 'surface:nvr-ui:browser',
+        contributionType: SWARM.CONTRIBUTION_TYPE.OBSERVATION,
+        state: SWARM.OPERATION_POSTURE_STATE.DEFERRED,
+        required: false,
+        authorityRefs: ['grant:surface:nvr-preview:bind'],
+        primitiveRefs: ['primitive:surface.element-binding'],
+        capabilityRefs: ['surface.media-element.bind'],
+        inputRefs: [operationRef, fulfillmentSessionRef].filter(Boolean),
+        outputRefs: [surfaceBindingRef],
+        deferredReasons: ['surfaceBindingObservationPending'],
+        safeFacts: {
+          surfaceAbsenceDoesNotBlockRuntime: true,
+          surfaceMayAttachLate: true,
+        },
+      },
+    ],
+    runtimeProjectionRefs: [`runtime:operation-projection:${refSafeToken(operationRef, 'stream-open')}`],
+    surfaceBindingRefs: [surfaceBindingRef],
+    cleanupRefs: [`cleanup:${refSafeToken(fulfillmentSessionRef, 'stream')}`],
+    evidenceRefs: [evidenceRef],
+    safeFacts: {
+      runtimeAllocatesSelectedOperationRefs: true,
+      surfaceBindsElementsAndObserves: true,
+      surfaceDoesNotSupplyFlowTruth: true,
+    },
+    observedAt: issuedAt,
+    expiresAt,
+  });
 }
 
 function runtimeCandidatePayloads(intent, payload) {
@@ -7388,8 +7947,57 @@ async function resolveRuntimeCapability(message) {
   return { ok: true, result };
 }
 
-async function queueRuntimeAppIntent(method, message) {
+function prepareRuntimeStreamOpen(message) {
   const intent = appIntentPayload(message);
+  const issuedAt = Number(intent.issuedAt || 0) || nowMs();
+  const expiresAt = Number(intent.expiresAt || 0) || (issuedAt + positiveNumber(intent.ttlMs || intent.timeoutMs, 120_000));
+  const boundIntent = withRuntimeStreamBinding(RUNTIME_APP_INTENT.STREAM_OPEN, {
+    ...intent,
+    capabilityRef: String(intent.capabilityRef || intent.capability || SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW).trim(),
+  });
+  const intentId = String(intent.intentId || '').trim() || randomOpaqueId('stream-intent');
+  const sourceIds = normalizeArray(boundIntent.sourceIds || boundIntent.sources || boundIntent.offer?.sourceIds || boundIntent.payload?.sourceIds)
+    .concat(String(boundIntent.sourceId || boundIntent.payload?.sourceId || '').trim() ? [boundIntent.sourceId || boundIntent.payload?.sourceId] : [])
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  const operationInstancePosture = runtimeStreamOperationInstancePosture(RUNTIME_APP_INTENT.STREAM_OPEN, boundIntent, {
+    intentId,
+    sourceIds,
+    issuedAt,
+    expiresAt,
+  });
+  const result = {
+    kind: RUNTIME_APP_INTENT.STREAM_PREPARE,
+    local: true,
+    state: 'prepared',
+    nonce: boundIntent.nonce,
+    sessionId: boundIntent.sessionId,
+    fulfillmentSessionId: boundIntent.fulfillmentSessionId,
+    operationRef: boundIntent.operationRef,
+    operationClassRef: boundIntent.operationClassRef,
+    methodRef: boundIntent.methodRef,
+    operationInstancePosture,
+    intentId,
+    capabilityRef: appIntentCapability(RUNTIME_APP_INTENT.STREAM_OPEN, boundIntent),
+    nodeRef: appIntentNodeRef(RUNTIME_APP_INTENT.STREAM_OPEN, boundIntent),
+    transport: String(boundIntent.transport || 'webrtc').trim() || 'webrtc',
+    sourceIds: Array.from(new Set(sourceIds)),
+    issuedAt,
+    expiresAt,
+  };
+  recordRuntimeEvent('runtime.stream.prepared', {
+    sessionId: result.sessionId,
+    fulfillmentSessionId: result.fulfillmentSessionId,
+    operationRef: result.operationRef,
+    intentId,
+    capability: result.capabilityRef,
+    sourceIds: result.sourceIds,
+  });
+  return { ok: true, result };
+}
+
+async function queueRuntimeAppIntent(method, message) {
+  const intent = withRuntimeStreamBinding(method, appIntentPayload(message));
   const requestId = String(intent.requestId || message.requestId || '').trim();
   const posture = await runtimeAuthorityPosture();
   if (posture.state !== 'ready') {
@@ -8213,6 +8821,75 @@ function targetSlot(slotRef, state, platformFitState, candidateFulfillmentRefs =
   };
 }
 
+function runtimeExecutionFulfillmentSlot() {
+  const bridgePostures = Array.from(runtimeRunnerBridgePostures.values())
+    .filter((posture) => posture && typeof posture === 'object');
+  const projections = Array.from(runtimeFulfillmentSessionProjections.values())
+    .filter((projection) => projection && typeof projection === 'object');
+  const readyProjections = projections.filter((projection) => {
+    const state = String(projection.state || '').trim();
+    return state && state !== FABRIC.LIFECYCLE_MANIFEST_STATE.BLOCKED && state !== 'blocked';
+  });
+  const evidenceRefs = uniqueTrimmedStrings([
+    ...bridgePostures.map((posture) => `evidence:${posture.bridgeRef}`),
+    ...readyProjections.map((projection) => `evidence:${projection.projectionRef || projection.sessionId}`),
+  ]);
+  const adapterCandidateRefs = uniqueTrimmedStrings(
+    bridgePostures
+      .filter((posture) => {
+        const state = String(posture.state || '').trim();
+        const adapterRegistered = posture.safeFacts?.hostAdapterRegistered === true;
+        return adapterRegistered && state !== 'blocked';
+      })
+      .map((posture) => posture.adapterRef || posture.bridgeRef),
+  );
+  const projectionCandidateRefs = uniqueTrimmedStrings(
+    readyProjections
+      .filter(() => adapterCandidateRefs.length > 0)
+      .map((projection) => projection.projectionRef || projection.sessionId),
+  );
+  const candidateRefs = projectionCandidateRefs.length ? projectionCandidateRefs : adapterCandidateRefs;
+  const blockedReasons = uniqueTrimmedStrings(
+    bridgePostures.flatMap((posture) => normalizeArray(posture.blockedReasons)),
+  );
+  const missingAdapter = bridgePostures.length === 0;
+  const missingProjection = projectionCandidateRefs.length === 0;
+  const blocked = blockedReasons.length > 0;
+  const state = projectionCandidateRefs.length
+    ? FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE
+    : (blocked ? FABRIC.CONTRACT_TARGET_SLOT_STATE.BLOCKED : FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED);
+  return targetSlot(
+    'slot:execution-fulfillment',
+    missingAdapter ? FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED : state,
+    candidateRefs.length
+      ? FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.COMPATIBLE
+      : FABRIC.CONTRACT_TARGET_PLATFORM_FIT_STATE.DEGRADED,
+    candidateRefs,
+    {
+      selectedFulfillmentRef: projectionCandidateRefs[0] || '',
+      sourceRefs: projectionCandidateRefs,
+      adapterRefs: uniqueTrimmedStrings([
+        'adapter:runtime-runner-bridge:host-selected',
+        ...bridgePostures.map((posture) => posture.adapterRef),
+      ]),
+      evidenceRefs,
+      blockedReasons: missingAdapter ? ['runtimeRunnerBridgePostureMissing'] : blockedReasons,
+      safeFacts: {
+        role: FABRIC.MEMBER_ROLE.EXECUTION_FULFILLMENT,
+        bridgePostureCount: bridgePostures.length,
+        projectionCount: projections.length,
+        selectedProjectionCount: projectionCandidateRefs.length,
+        hostAdapterRegistered: adapterCandidateRefs.length > 0,
+        primaryControl: projectionCandidateRefs.length ? 'manifestSessionProjection' : 'legacyBridgeFallback',
+        legacyPathState: projectionCandidateRefs.length ? 'fallbackOnly' : 'activeFallback',
+        adapterCandidateRefs,
+        projectionCandidateRefs,
+        missingProjection,
+      },
+    },
+  );
+}
+
 function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
   const services = normalizeArray(catalog?.services);
   const fabricRecords = runtimeHostFabricRecordsFromCatalog(catalog);
@@ -8288,6 +8965,7 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
         evidenceRefs: ['evidence:service-manager:target-reducer'],
       },
     ),
+    runtimeExecutionFulfillmentSlot(),
     targetSlot(
       'slot:surface',
       FABRIC.CONTRACT_TARGET_SLOT_STATE.AVAILABLE,
@@ -8344,19 +9022,30 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
   const degradedSlotRefs = slotPostures
     .filter((slot) => slot.state === FABRIC.CONTRACT_TARGET_SLOT_STATE.DEGRADED)
     .map((slot) => slot.slotRef);
+  const blockedSlotRefs = slotPostures
+    .filter((slot) => slot.state === FABRIC.CONTRACT_TARGET_SLOT_STATE.BLOCKED)
+    .map((slot) => slot.slotRef);
   const blockedReasons = uniqueTrimmedStrings([
     ...slotPostures.flatMap((slot) => normalizeArray(slot.blockedReasons)),
   ]);
+  const targetState = blockedSlotRefs.length
+    ? FABRIC.CONTRACT_TARGET_STATE.BLOCKED
+    : (missingSlotRefs.length || degradedSlotRefs.length
+      ? FABRIC.CONTRACT_TARGET_STATE.DEGRADED
+      : FABRIC.CONTRACT_TARGET_STATE.READY);
+  const registryState = blockedSlotRefs.length
+    ? FABRIC.CONTRACT_TARGET_REGISTRY_STATE.BLOCKED
+    : (missingSlotRefs.length || degradedSlotRefs.length
+      ? FABRIC.CONTRACT_TARGET_REGISTRY_STATE.DEGRADED
+      : FABRIC.CONTRACT_TARGET_REGISTRY_STATE.READY);
   const target = assertContractTarget({
     kind: SWARM.RECORD_KIND.CONTRACT_TARGET,
     targetRef,
     contractRef: 'app:constitution-runtime-target@msa-transition',
     profileRef: 'target-profile:desktop-dev',
     platformRef: 'platform:windows-desktop',
-    state: missingSlotRefs.length || degradedSlotRefs.length
-      ? FABRIC.CONTRACT_TARGET_STATE.DEGRADED
-      : FABRIC.CONTRACT_TARGET_STATE.READY,
-    compatibilityState: missingSlotRefs.length || degradedSlotRefs.length
+    state: targetState,
+    compatibilityState: targetState !== FABRIC.CONTRACT_TARGET_STATE.READY
       ? FABRIC.CONTRACT_TARGET_COMPATIBILITY_STATE.DEGRADED
       : FABRIC.CONTRACT_TARGET_COMPATIBILITY_STATE.COMPATIBLE,
     hostRef: 'host:local-workstation',
@@ -8368,6 +9057,7 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
     adapterPackRef: 'adapter-pack:browser-runtime-local',
     adapterRefs: [
       'adapter:runtime-shared-worker',
+      'adapter:runtime-runner-bridge:host-selected',
       'adapter:runtime-surface-client',
       'adapter:browser-webrtc',
       'adapter:host-service:windows',
@@ -8386,6 +9076,7 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
       source: 'runtime.snapshot',
       serviceCount: services.length,
       nativeClient: 'notRequired',
+      blockedSlotRefs,
     },
     issuedAt: sampledAt,
     expiresAt: sampledAt + 60_000,
@@ -8395,17 +9086,10 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
     registryRef,
     targetRef,
     contractRef: target.contractRef,
-    state: missingSlotRefs.length || degradedSlotRefs.length
-      ? FABRIC.CONTRACT_TARGET_REGISTRY_STATE.DEGRADED
-      : FABRIC.CONTRACT_TARGET_REGISTRY_STATE.READY,
+    state: registryState,
     slotPostures,
     candidateFulfillmentRefs: uniqueTrimmedStrings([
-      runtimeRef,
-      'surface:first-party-browser',
-      'fulfillment:service-manager:local-dev',
-      ...gatewayFulfillmentRefs,
-      ...serviceFulfillmentRefs,
-      'fulfillment:browser-webrtc:authenticated-desktop-browser',
+      ...slotPostures.flatMap((slot) => normalizeArray(slot.candidateFulfillmentRefs)),
     ]),
     sourceRefs: ['projection:swarm.directory', 'projection:retained.services'],
     buildRefs: [],
@@ -8419,6 +9103,7 @@ function runtimeContractTargetSource(catalog, sampledAt = nowMs()) {
       source: 'runtime.snapshot',
       serviceCount: services.length,
       nativeClient: 'notRequired',
+      blockedSlotRefs,
     },
     observedAt: sampledAt,
     expiresAt: sampledAt + 60_000,
@@ -9785,6 +10470,10 @@ function runtimeSnapshot() {
     retention: safeClone(runtimeRetentionPostureSummary()),
     materialization: safeClone(runtimeMaterializationSummary()),
     diagnostics: diagnosticSnapshot(),
+    runnerOperations: runnerOperationDispatchObject(),
+    runtimeRunnerBridgePostures: runtimeRunnerBridgePostureObject(),
+    runtimeFulfillmentSessionProjections: runtimeFulfillmentSessionProjectionObject(),
+    runtimeFulfillmentSessionProjectionIndex: runtimeFulfillmentSessionProjectionIndex(),
     runtimeEvents: runtimeEvents.slice(-RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT).map((entry) => safeClone(entry)),
     mediaFulfillment: mediaFulfillmentObject(),
     streamRecovery: streamRecoveryObject(),
@@ -9880,6 +10569,10 @@ function serializedRuntimeState() {
     },
     diagnostics: diagnosticSnapshot(),
     runtimeEvents: runtimeEvents.map((entry) => safeClone(entry)),
+    runnerOperations: runnerOperationDispatchObject(),
+    runtimeRunnerBridgePostures: runtimeRunnerBridgePostureObject(),
+    runtimeFulfillmentSessionProjections: runtimeFulfillmentSessionProjectionObject(),
+    runtimeFulfillmentSessionProjectionIndex: runtimeFulfillmentSessionProjectionIndex(),
     mediaFulfillment: mediaFulfillmentObject(),
     swarmQueue: swarmQueueObject(),
     projections: retainedProjectionStoreObject(),
@@ -9969,6 +10662,39 @@ async function hydrateRuntimeState() {
         runtimeEvents.length,
         ...normalizeArray(payload.runtimeEvents).map((entry) => safeClone(entry)).slice(-RUNTIME_DIAGNOSTIC_RING_LIMIT),
       );
+    }
+    runnerOperationDispatches.clear();
+    const persistedRunnerOperations = payload.runnerOperations && typeof payload.runnerOperations === 'object'
+      ? payload.runnerOperations
+      : {};
+    for (const dispatch of Object.values(persistedRunnerOperations)) {
+      if (!dispatch || typeof dispatch !== 'object') continue;
+      const dispatchId = String(dispatch.dispatchId || '').trim();
+      if (!dispatchId || runnerOperationDispatches.has(dispatchId)) continue;
+      runnerOperationDispatches.set(dispatchId, safeClone(dispatch));
+    }
+    runtimeRunnerBridgePostures.clear();
+    const persistedRunnerBridgePostures = payload.runtimeRunnerBridgePostures && typeof payload.runtimeRunnerBridgePostures === 'object'
+      ? payload.runtimeRunnerBridgePostures
+      : {};
+    for (const posture of Object.values(persistedRunnerBridgePostures)) {
+      if (!posture || typeof posture !== 'object') continue;
+      const bridgeRef = String(posture.bridgeRef || '').trim();
+      if (!bridgeRef || runtimeRunnerBridgePostures.has(bridgeRef)) continue;
+      runtimeRunnerBridgePostures.set(bridgeRef, safeClone(posture));
+    }
+    runtimeFulfillmentSessionProjections.clear();
+    const persistedFulfillmentSessionProjections = payload.runtimeFulfillmentSessionProjections && typeof payload.runtimeFulfillmentSessionProjections === 'object'
+      ? payload.runtimeFulfillmentSessionProjections
+      : {};
+    for (const projection of Object.values(persistedFulfillmentSessionProjections)) {
+      if (!projection || typeof projection !== 'object') continue;
+      try {
+        const normalized = assertRuntimeFulfillmentSessionProjection(projection);
+        const key = runtimeFulfillmentSessionProjectionStoreKey(normalized);
+        if (!key || runtimeFulfillmentSessionProjections.has(key)) continue;
+        runtimeFulfillmentSessionProjections.set(key, safeClone(normalized));
+      } catch {}
     }
     for (const timer of serviceAdmissionTimeoutTimers.values()) self.clearTimeout(timer);
     serviceAdmissionTimeoutTimers.clear();
@@ -10302,6 +11028,7 @@ function mediaFulfillmentEntrySnapshot(entry) {
   return {
     kind: 'media.fulfillment.posture',
     postureId: entry.postureId,
+    fulfillmentSessionId: entry.fulfillmentSessionId,
     sessionId: entry.sessionId,
     activationId: entry.activationId,
     interactionId: entry.interactionId,
@@ -10455,6 +11182,7 @@ function reduceMediaFulfillmentEvidence(record) {
   const previous = mediaFulfillmentPostures.get(key);
   const entry = previous || {
     postureId: `media-fulfillment:${key}`,
+    fulfillmentSessionId: '',
     sessionId: '',
     activationId: '',
     interactionId: '',
@@ -10479,6 +11207,7 @@ function reduceMediaFulfillmentEvidence(record) {
     latestEvidence: null,
     evidenceByKind: new Map(),
   };
+  entry.fulfillmentSessionId = String(record.fulfillmentSessionId || entry.fulfillmentSessionId || '').trim();
   entry.sessionId = String(record.sessionId || entry.sessionId || '').trim();
   entry.activationId = String(record.activationId || entry.activationId || '').trim();
   entry.interactionId = String(record.interactionId || entry.interactionId || '').trim();
@@ -10651,12 +11380,470 @@ function handleRuntimeStreamRecoveryRequest(message) {
   return { ok: true, result: safeClone(posture) };
 }
 
+function runnerHostFulfillmentStateFromOperation(runnerOperation, blockedReasons = []) {
+  if (blockedReasons.length) return RUNNER.HOST_FULFILLMENT_STATE.BLOCKED;
+  if (runnerOperation.state === RUNNER.OPERATION_STATE.REJECTED) return RUNNER.HOST_FULFILLMENT_STATE.REJECTED;
+  if (runnerOperation.state === RUNNER.OPERATION_STATE.CANCELLED) return RUNNER.HOST_FULFILLMENT_STATE.CANCELLED;
+  if (runnerOperation.operation === RUNNER.OPERATION.RELEASE || runnerOperation.state === RUNNER.OPERATION_STATE.RELEASED) {
+    return RUNNER.HOST_FULFILLMENT_STATE.RELEASED;
+  }
+  if (runnerOperation.state === RUNNER.OPERATION_STATE.SUCCEEDED) return RUNNER.HOST_FULFILLMENT_STATE.SUCCEEDED;
+  if (runnerOperation.state === RUNNER.OPERATION_STATE.RUNNING) return RUNNER.HOST_FULFILLMENT_STATE.RUNNING;
+  if (runnerOperation.state === RUNNER.OPERATION_STATE.ACCEPTED || runnerOperation.state === RUNNER.OPERATION_STATE.REQUESTED) {
+    return RUNNER.HOST_FULFILLMENT_STATE.ACCEPTED;
+  }
+  if (runnerOperation.state === RUNNER.OPERATION_STATE.FAILED || runnerOperation.state === RUNNER.OPERATION_STATE.BLOCKED) {
+    return RUNNER.HOST_FULFILLMENT_STATE.BLOCKED;
+  }
+  return RUNNER.HOST_FULFILLMENT_STATE.DEGRADED;
+}
+
+function runtimeRunnerHostFulfillmentPosture(runnerOperation, options = {}) {
+  const observedAt = Number(options.observedAt || nowMs());
+  const blockedReasons = uniqueTrimmedStrings([
+    ...normalizeArray(runnerOperation.blockedReasons),
+    ...normalizeArray(options.blockedReasons),
+  ]);
+  if (runnerOperation.state === RUNNER.OPERATION_STATE.BLOCKED && blockedReasons.length === 0) {
+    blockedReasons.push('runnerOperation:blocked');
+  }
+  const state = runnerHostFulfillmentStateFromOperation(runnerOperation, blockedReasons);
+  const executionKind = String(runnerOperation.safeFacts?.executionKind || '').trim();
+  const evidenceRefs = uniqueTrimmedStrings([
+    ...normalizeArray(runnerOperation.evidenceRefs),
+    `runtime-runner-dispatch:${runnerOperation.operationId}`,
+    ...(state === RUNNER.HOST_FULFILLMENT_STATE.ACCEPTED ? ['evidence:runtime-runner-host:accepted'] : []),
+    ...(state === RUNNER.HOST_FULFILLMENT_STATE.SUCCEEDED ? ['evidence:runtime-runner-host:completed'] : []),
+  ]);
+  const posture = {
+    kind: SWARM.RECORD_KIND.RUNNER_HOST_FULFILLMENT_POSTURE,
+    postureId: String(options.postureId || `runner-host:${runnerOperation.runnerId}:${runnerOperation.operationId}`),
+    runnerId: runnerOperation.runnerId,
+    runnerRef: runnerOperation.runnerRef,
+    hostRef: runnerOperation.hostRef,
+    operationId: runnerOperation.operationId,
+    operation: runnerOperation.operation,
+    state,
+    requesterRef: runnerOperation.requesterRef,
+    subjectRef: runnerOperation.subjectRef,
+    contractRef: runnerOperation.contractRef,
+    contractRefs: uniqueTrimmedStrings([runnerOperation.contractRef, ...normalizeArray(options.contractRefs)]),
+    grantRefs: uniqueTrimmedStrings(runnerOperation.grantRefs),
+    capabilityRefs: uniqueTrimmedStrings(runnerOperation.capabilityRefs),
+    inputRefs: uniqueTrimmedStrings(runnerOperation.inputRefs),
+    outputRefs: uniqueTrimmedStrings(runnerOperation.outputRefs),
+    evidenceRefs,
+    proofRefs: uniqueTrimmedStrings(runnerOperation.proofRefs),
+    releaseRefs: uniqueTrimmedStrings(runnerOperation.releaseRefs),
+    witnessRefs: uniqueTrimmedStrings(options.witnessRefs),
+    resourceBudget: safeClone(runnerOperation.resourceBudget),
+    resourcePosture: runnerOperation.resourcePosture ? safeClone(runnerOperation.resourcePosture) : null,
+    secretBoundary: runnerOperation.secretBoundary || { state: 'notRequired' },
+    releasePosture: runnerOperation.releasePosture || null,
+    rollbackPosture: runnerOperation.rollbackPosture || null,
+    blockedReasons,
+    safeFacts: {
+      ...(runnerOperation.safeFacts && typeof runnerOperation.safeFacts === 'object' ? safeClone(runnerOperation.safeFacts) : {}),
+      runtimeDispatch: true,
+      inputRefCount: normalizeArray(runnerOperation.inputRefs).length,
+      outputRefCount: normalizeArray(runnerOperation.outputRefs).length,
+    },
+    observedAt,
+    ...(runnerOperation.expiresAt ? { expiresAt: runnerOperation.expiresAt } : {}),
+  };
+  if (executionKind) posture.safeFacts.executionKind = executionKind;
+  if (runnerOperation.releaseRef) posture.releaseRef = runnerOperation.releaseRef;
+  if (runnerOperation.rollbackRef) posture.rollbackRef = runnerOperation.rollbackRef;
+  return assertRunnerHostFulfillmentPosture(posture);
+}
+
+function recordRuntimeRunnerOperationDispatch(runnerOperation, options = {}) {
+  const operation = assertRunnerOperation(runnerOperation);
+  const dispatchId = String(options.dispatchId || `runtime-runner-dispatch:${operation.operationId}`);
+  const existing = runnerOperationDispatches.get(dispatchId);
+  if (existing) return existing;
+  const observedAt = Number(options.observedAt || nowMs());
+  const hostFulfillmentPosture = runtimeRunnerHostFulfillmentPosture(operation, { observedAt });
+  const dispatch = {
+    kind: 'runtime.runner.operation.dispatch',
+    dispatchId,
+    state: hostFulfillmentPosture.state,
+    source: String(options.source || 'runtime.message').trim(),
+    clientId: String(options.clientId || '').trim(),
+    surface: String(options.surface || '').trim(),
+    operationId: operation.operationId,
+    runnerRef: operation.runnerRef,
+    hostRef: operation.hostRef,
+    subjectRef: operation.subjectRef,
+    contractRef: operation.contractRef,
+    runnerOperation: safeClone(operation),
+    hostFulfillmentPosture,
+    blockedReasons: safeClone(hostFulfillmentPosture.blockedReasons || []),
+    observedAt,
+  };
+  runnerOperationDispatches.set(dispatchId, safeClone(dispatch));
+  while (runnerOperationDispatches.size > 50) {
+    const first = runnerOperationDispatches.keys().next().value;
+    if (!first) break;
+    runnerOperationDispatches.delete(first);
+  }
+  recordRuntimeEvent('runtime.runner.operation.dispatched', {
+    level: hostFulfillmentPosture.state === RUNNER.HOST_FULFILLMENT_STATE.BLOCKED ? 'warn' : 'info',
+    dispatchId,
+    operationId: operation.operationId,
+    runnerRef: operation.runnerRef,
+    hostRef: operation.hostRef,
+    subjectRef: operation.subjectRef,
+    executionKind: String(operation.safeFacts?.executionKind || '').trim(),
+    state: hostFulfillmentPosture.state,
+  });
+  return dispatch;
+}
+
+function recordRuntimeRunnerHostFulfillment(hostFulfillmentPosture, options = {}) {
+  const posture = assertRunnerHostFulfillmentPosture(hostFulfillmentPosture);
+  const dispatchId = String(options.dispatchId || `runtime-runner-dispatch:${posture.operationId}`);
+  const existing = runnerOperationDispatches.get(dispatchId) || runnerOperationDispatches.get(posture.operationId) || null;
+  const observedAt = Number(options.observedAt || posture.observedAt || nowMs());
+  const dispatch = {
+    ...(existing && typeof existing === 'object' ? safeClone(existing) : {}),
+    kind: 'runtime.runner.operation.dispatch',
+    dispatchId,
+    state: posture.state,
+    source: String(options.source || 'runner.host.fulfillment.posture').trim(),
+    clientId: String(options.clientId || existing?.clientId || '').trim(),
+    surface: String(options.surface || existing?.surface || '').trim(),
+    operationId: posture.operationId,
+    runnerRef: posture.runnerRef,
+    hostRef: posture.hostRef,
+    subjectRef: posture.subjectRef,
+    contractRef: posture.contractRef,
+    runnerOperation: existing?.runnerOperation ? safeClone(existing.runnerOperation) : null,
+    hostFulfillmentPosture: safeClone(posture),
+    blockedReasons: safeClone(posture.blockedReasons || []),
+    observedAt,
+    reportedAt: observedAt,
+  };
+  runnerOperationDispatches.set(dispatchId, safeClone(dispatch));
+  while (runnerOperationDispatches.size > 50) {
+    const first = runnerOperationDispatches.keys().next().value;
+    if (!first) break;
+    runnerOperationDispatches.delete(first);
+  }
+  recordRuntimeEvent('runtime.runner.fulfillment.reported', {
+    level: posture.state === RUNNER.HOST_FULFILLMENT_STATE.BLOCKED ? 'warn' : 'info',
+    dispatchId,
+    operationId: posture.operationId,
+    runnerRef: posture.runnerRef,
+    hostRef: posture.hostRef,
+    subjectRef: posture.subjectRef,
+    state: posture.state,
+  });
+  return dispatch;
+}
+
+function normalizeRuntimeRunnerBridgePosture(source, options = {}) {
+  if (!source || typeof source !== 'object') {
+    throw new Error('runtime runner bridge posture is required');
+  }
+  const bridgeRef = String(source.bridgeRef || options.bridgeRef || '').trim();
+  if (!bridgeRef) throw new Error('runtime runner bridge posture requires bridgeRef');
+  const state = String(source.state || 'unknown').trim() || 'unknown';
+  const observedAt = Number(source.observedAt || options.observedAt || nowMs());
+  return {
+    kind: 'runtime.runner.bridge.posture',
+    bridgeRef,
+    state,
+    runtimeRef: String(source.runtimeRef || '').trim(),
+    adapterRef: String(source.adapterRef || '').trim(),
+    dispatchId: String(source.dispatchId || '').trim(),
+    operationId: String(source.operationId || '').trim(),
+    fulfilledCount: Number(source.fulfilledCount || 0),
+    skippedCount: Number(source.skippedCount || 0),
+    blockedReasons: normalizeArray(source.blockedReasons).map((reason) => String(reason || '').trim()).filter(Boolean),
+    evidenceRefs: uniqueTrimmedStrings(source.evidenceRefs),
+    safeFacts: source.safeFacts && typeof source.safeFacts === 'object' ? safeClone(source.safeFacts) : {},
+    clientId: String(options.clientId || source.clientId || '').trim(),
+    surface: String(options.surface || source.surface || '').trim(),
+    observedAt,
+  };
+}
+
+function recordRuntimeRunnerBridgePosture(source, options = {}) {
+  const posture = normalizeRuntimeRunnerBridgePosture(source, options);
+  runtimeRunnerBridgePostures.set(posture.bridgeRef, safeClone(posture));
+  while (runtimeRunnerBridgePostures.size > 20) {
+    const first = runtimeRunnerBridgePostures.keys().next().value;
+    if (!first) break;
+    runtimeRunnerBridgePostures.delete(first);
+  }
+  recordRuntimeEvent('runtime.runner.bridge.posture.updated', {
+    level: posture.state === 'blocked' ? 'warn' : 'info',
+    bridgeRef: posture.bridgeRef,
+    runtimeRef: posture.runtimeRef,
+    adapterRef: posture.adapterRef,
+    state: posture.state,
+    fulfilledCount: posture.fulfilledCount,
+    skippedCount: posture.skippedCount,
+    blockedReason: posture.blockedReasons[0] || '',
+  });
+  return posture;
+}
+
+function recordRuntimeFulfillmentSessionProjection(source, options = {}) {
+  const projection = assertRuntimeFulfillmentSessionProjection(source);
+  const key = runtimeFulfillmentSessionProjectionStoreKey(projection);
+  if (!key) throw new Error('runtime fulfillment-session projection requires projectionRef or sessionId');
+  runtimeFulfillmentSessionProjections.set(key, safeClone(projection));
+  while (runtimeFulfillmentSessionProjections.size > 100) {
+    const first = runtimeFulfillmentSessionProjections.keys().next().value;
+    if (!first) break;
+    runtimeFulfillmentSessionProjections.delete(first);
+  }
+  recordRuntimeEvent('runtime.fulfillment-session.projection.updated', {
+    level: projection.state === 'blocked' ? 'warn' : 'info',
+    projectionRef: projection.projectionRef,
+    sessionId: projection.sessionId,
+    lifecycleManifestRef: projection.lifecycleManifestRef,
+    parentIntentRef: projection.parentIntentRef,
+    subjectRef: projection.subjectRef,
+    hostRef: projection.hostRef || '',
+    runnerRef: projection.runnerRef || '',
+    adapterDebtState: projection.adapterDebtState || '',
+    source: String(options.source || '').trim(),
+  });
+  return projection;
+}
+
+function runtimeReportMessageFrom(message = {}) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  return message.runtimeReportMessage && typeof message.runtimeReportMessage === 'object'
+    ? message.runtimeReportMessage
+    : (payload.runtimeReportMessage && typeof payload.runtimeReportMessage === 'object'
+      ? payload.runtimeReportMessage
+      : null);
+}
+
+function recordRuntimeReportMessage(runtimeReportMessage, options = {}) {
+  if (!runtimeReportMessage || typeof runtimeReportMessage !== 'object') {
+    return { fulfillmentSession: null, fulfillmentSessionProjection: null };
+  }
+  const fulfillmentSession = runtimeReportMessage.fulfillmentSession
+    ? assertFulfillmentSession(runtimeReportMessage.fulfillmentSession)
+    : null;
+  const fulfillmentSessionProjection = runtimeReportMessage.fulfillmentSessionProjection
+    ? recordRuntimeFulfillmentSessionProjection(runtimeReportMessage.fulfillmentSessionProjection, options)
+    : null;
+  if (fulfillmentSession && fulfillmentSessionProjection) {
+    if (fulfillmentSessionProjection.sessionId !== fulfillmentSession.sessionId) {
+      throw new Error('runtime report fulfillmentSessionProjection sessionId must match fulfillmentSession');
+    }
+    if (fulfillmentSessionProjection.lifecycleManifestRef !== fulfillmentSession.contractRef) {
+      throw new Error('runtime report fulfillmentSessionProjection lifecycleManifestRef must match fulfillmentSession contractRef');
+    }
+    if (fulfillmentSessionProjection.parentIntentRef !== fulfillmentSession.parentIntentRef) {
+      throw new Error('runtime report fulfillmentSessionProjection parentIntentRef must match fulfillmentSession parentIntentRef');
+    }
+  }
+  return { fulfillmentSession, fulfillmentSessionProjection };
+}
+
+function runtimeFulfillmentSessionProjectionMatches(projection, query = {}) {
+  const queryKeys = projection?.queryKeys && typeof projection.queryKeys === 'object' ? projection.queryKeys : {};
+  const matchesScalar = (field, value) => {
+    const expected = String(value || '').trim();
+    if (!expected) return true;
+    return String(field || '').trim() === expected;
+  };
+  if (!matchesScalar(projection?.projectionRef, query.projectionRef)) return false;
+  if (!matchesScalar(projection?.sessionId, query.sessionId || query.bySession)) return false;
+  if (!matchesScalar(projection?.lifecycleManifestRef, query.lifecycleManifestRef || query.manifestRef || query.byManifest)) return false;
+  if (!matchesScalar(projection?.parentIntentRef, query.parentIntentRef || query.byParentIntent)) return false;
+  if (!matchesScalar(projection?.subjectRef, query.subjectRef || query.bySubject)) return false;
+  if (!matchesScalar(projection?.hostRef, query.hostRef || query.byHost)) return false;
+  if (!matchesScalar(projection?.runnerRef, query.runnerRef || query.byRunner)) return false;
+  if (!matchesScalar(projection?.adapterDebtState, query.adapterDebtState || query.byAdapterDebt)) return false;
+  const storageAvailabilityRef = String(query.storageAvailabilityRef || query.byStorageAvailability || '').trim();
+  if (storageAvailabilityRef) {
+    const refs = normalizeArray(projection?.storageAvailabilityRefs || queryKeys.byStorageAvailability)
+      .map((ref) => String(ref || '').trim())
+      .filter(Boolean);
+    if (!refs.includes(storageAvailabilityRef)) return false;
+  }
+  return true;
+}
+
+function handleRuntimeFulfillmentSessionProjectionPut(message, endpoint) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  const source = message?.fulfillmentSessionProjection && typeof message.fulfillmentSessionProjection === 'object'
+    ? message.fulfillmentSessionProjection
+    : (payload.fulfillmentSessionProjection && typeof payload.fulfillmentSessionProjection === 'object'
+      ? payload.fulfillmentSessionProjection
+      : payload);
+  try {
+    const projection = recordRuntimeFulfillmentSessionProjection(source, {
+      source: 'runtime.message.fulfillmentSessionProjection',
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+    });
+    touchRuntime();
+    schedulePersist();
+    broadcastSnapshot();
+    return { ok: true, result: safeClone(projection) };
+  } catch (error) {
+    recordRuntimeEvent('runtime.fulfillment-session.projection.rejected', {
+      level: 'warn',
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+      error: String(error?.message || error || 'runtime fulfillment-session projection rejected'),
+    });
+    return { ok: false, error: String(error?.message || error || 'runtime fulfillment-session projection rejected') };
+  }
+}
+
+function handleRuntimeFulfillmentSessionProjectionGet(message) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  const query = { ...payload, ...message };
+  const projections = Array.from(runtimeFulfillmentSessionProjections.values())
+    .filter((projection) => runtimeFulfillmentSessionProjectionMatches(projection, query))
+    .map((projection) => safeClone(projection));
+  return {
+    ok: true,
+    result: {
+      projections,
+      index: runtimeFulfillmentSessionProjectionIndex(),
+    },
+  };
+}
+
+function handleRuntimeRunnerOperationSubmit(message, endpoint) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  const source = message?.runnerOperation && typeof message.runnerOperation === 'object'
+    ? message.runnerOperation
+    : (payload.runnerOperation && typeof payload.runnerOperation === 'object'
+      ? payload.runnerOperation
+      : payload);
+  try {
+    const dispatch = recordRuntimeRunnerOperationDispatch(source, {
+      source: 'runtime.message',
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+    });
+    touchRuntime();
+    schedulePersist();
+    broadcastSnapshot();
+    return { ok: true, result: safeClone(dispatch) };
+  } catch (error) {
+    recordRuntimeEvent('runtime.runner.operation.rejected', {
+      level: 'warn',
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+      error: String(error?.message || error || 'runner operation rejected'),
+    });
+    return { ok: false, error: String(error?.message || error || 'runner operation rejected') };
+  }
+}
+
+function handleRuntimeRunnerHostFulfillmentPut(message, endpoint) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  const runtimeReportMessage = runtimeReportMessageFrom(message);
+  const source = message?.hostFulfillmentPosture && typeof message.hostFulfillmentPosture === 'object'
+    ? message.hostFulfillmentPosture
+    : (payload.hostFulfillmentPosture && typeof payload.hostFulfillmentPosture === 'object'
+      ? payload.hostFulfillmentPosture
+      : (runtimeReportMessage?.hostFulfillmentPosture && typeof runtimeReportMessage.hostFulfillmentPosture === 'object'
+        ? runtimeReportMessage.hostFulfillmentPosture
+        : payload));
+  try {
+    const dispatch = recordRuntimeRunnerHostFulfillment(source, {
+      source: 'runtime.message.runnerHostFulfillment',
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+    });
+    const runtimeReport = recordRuntimeReportMessage(runtimeReportMessage, {
+      source: 'runtime.message.runnerHostFulfillment',
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+    });
+    touchRuntime();
+    schedulePersist();
+    broadcastSnapshot();
+    return {
+      ok: true,
+      result: {
+        ...safeClone(dispatch),
+        ...(runtimeReport.fulfillmentSessionProjection ? {
+          runtimeFulfillmentSessionProjection: safeClone(runtimeReport.fulfillmentSessionProjection),
+        } : {}),
+      },
+    };
+  } catch (error) {
+    recordRuntimeEvent('runtime.runner.fulfillment.rejected', {
+      level: 'warn',
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+      error: String(error?.message || error || 'runner host fulfillment rejected'),
+    });
+    return { ok: false, error: String(error?.message || error || 'runner host fulfillment rejected') };
+  }
+}
+
+function handleRuntimeRunnerBridgePosturePut(message, endpoint) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  const source = message?.posture && typeof message.posture === 'object'
+    ? message.posture
+    : (payload.posture && typeof payload.posture === 'object'
+      ? payload.posture
+      : payload);
+  try {
+    const posture = recordRuntimeRunnerBridgePosture(source, {
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+    });
+    touchRuntime();
+    schedulePersist();
+    broadcastSnapshot();
+    return { ok: true, result: safeClone(posture) };
+  } catch (error) {
+    recordRuntimeEvent('runtime.runner.bridge.posture.rejected', {
+      level: 'warn',
+      clientId: String(message?.clientId || endpoint?.clientId || '').trim(),
+      surface: String(endpoint?.surface || '').trim(),
+      error: String(error?.message || error || 'runtime runner bridge posture rejected'),
+    });
+    return { ok: false, error: String(error?.message || error || 'runtime runner bridge posture rejected') };
+  }
+}
+
+function consumeAttachContextRunnerOperation(entry) {
+  const runnerOperation = entry?.attachContext?.moduleLoadRunnerOperation;
+  if (!runnerOperation || typeof runnerOperation !== 'object') return false;
+  try {
+    recordRuntimeRunnerOperationDispatch(runnerOperation, {
+      source: 'attachContext.moduleLoadRunnerOperation',
+      clientId: String(entry.clientId || '').trim(),
+      surface: String(entry.surface || '').trim(),
+    });
+    return true;
+  } catch (error) {
+    recordRuntimeEvent('runtime.runner.operation.rejected', {
+      level: 'warn',
+      clientId: String(entry.clientId || '').trim(),
+      surface: String(entry.surface || '').trim(),
+      error: String(error?.message || error || 'attach context runner operation rejected'),
+    });
+    return false;
+  }
+}
+
 function handleMediaFulfillmentEvidencePut(message) {
   const source = message?.evidence || message?.record || message?.payload || message;
   const record = assertMediaFulfillmentEvidence(source);
   const posture = reduceMediaFulfillmentEvidence(record);
   recordRuntimeEvent('media.fulfillment.updated', {
     level: posture.state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED ? 'warn' : 'info',
+    fulfillmentSessionId: posture.fulfillmentSessionId,
+    pathId: String(record.safeFacts?.pathId || '').trim(),
     sessionId: posture.sessionId,
     activationId: posture.activationId,
     correlationId: posture.correlationId,
@@ -11019,6 +12206,10 @@ async function handleControlMessage(message, endpoint) {
       snapshotSubscription: message.snapshotSubscription,
       attachContext: message.attachContext,
     });
+    if (consumeAttachContextRunnerOperation(entry)) {
+      touchRuntime();
+      schedulePersist();
+    }
     startHydrationInBackground();
     const materialized = materializeRuntimeSnapshotForEndpoint(runtimeSnapshot(), entry);
     const materializationBudget = refreshRuntimeSnapshotMaterialization(entry, materialized.delivery);
@@ -11138,6 +12329,51 @@ async function handleControlMessage(message, endpoint) {
         requestId: String(message.requestId || '').trim(),
         kind: RUNTIME_MEDIA_FULFILLMENT_EVIDENCE_PUT,
         ...handleMediaFulfillmentEvidencePut(message),
+      };
+      break;
+    }
+    case RUNTIME_RUNNER_OPERATION_SUBMIT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_RUNNER_OPERATION_SUBMIT,
+        ...handleRuntimeRunnerOperationSubmit(message, endpoint),
+      };
+      break;
+    }
+    case RUNTIME_RUNNER_HOST_FULFILLMENT_PUT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_RUNNER_HOST_FULFILLMENT_PUT,
+        ...handleRuntimeRunnerHostFulfillmentPut(message, endpoint),
+      };
+      break;
+    }
+    case RUNTIME_RUNNER_BRIDGE_POSTURE_PUT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_RUNNER_BRIDGE_POSTURE_PUT,
+        ...handleRuntimeRunnerBridgePosturePut(message, endpoint),
+      };
+      break;
+    }
+    case RUNTIME_FULFILLMENT_SESSION_PROJECTION_PUT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_FULFILLMENT_SESSION_PROJECTION_PUT,
+        ...handleRuntimeFulfillmentSessionProjectionPut(message, endpoint),
+      };
+      break;
+    }
+    case RUNTIME_FULFILLMENT_SESSION_PROJECTION_GET: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_FULFILLMENT_SESSION_PROJECTION_GET,
+        ...handleRuntimeFulfillmentSessionProjectionGet(message),
       };
       break;
     }
@@ -11309,6 +12545,13 @@ async function handleControlMessage(message, endpoint) {
       swarmEdge.sessionId = '';
       swarmEdge.memberRef = '';
       swarmEdge.zoneScope = null;
+      resetCarrierEdgeRetry('manualDisconnect');
+      swarmEdge.releasePosture = {
+        state: 'released',
+        releasedAt: nowMs(),
+        closedAt: nowMs(),
+        reason: 'manualDisconnect',
+      };
       touchRuntime();
       broadcastSnapshot();
       response = {
@@ -11328,6 +12571,13 @@ async function handleControlMessage(message, endpoint) {
       swarmEdge.endpoint = '';
           swarmEdge.sessionId = String(message.sessionId || 'test-session').trim();
           swarmEdge.zoneScope = safeClone(message.zoneScope || message?.payload?.zoneScope || null);
+          resetCarrierEdgeRetry('testConnect');
+          swarmEdge.releasePosture = {
+            state: 'held',
+            releasedAt: 0,
+            closedAt: 0,
+            reason: 'testConnect',
+          };
           sendQueuedSwarmFrames();
           requestRuntimeDirectoryObserve('edge.test.connect');
           void flushPendingRouteIntents('edge.test.connect');
@@ -11344,6 +12594,12 @@ async function handleControlMessage(message, endpoint) {
       swarmEdge.connected = false;
       swarmEdge.sessionId = '';
       swarmEdge.zoneScope = null;
+      swarmEdge.releasePosture = {
+        state: 'released',
+        releasedAt: nowMs(),
+        closedAt: nowMs(),
+        reason: 'testDisconnect',
+      };
       touchRuntime();
       broadcastSnapshot();
       response = {
@@ -11409,6 +12665,15 @@ async function handleControlMessage(message, endpoint) {
         requestId: String(message.requestId || '').trim(),
         kind: PROJECTION_DELTA_APPLY,
         ...handleProjectionDeltaApply(message),
+      };
+      break;
+    }
+    case RUNTIME_APP_INTENT.STREAM_PREPARE: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: type,
+        ...prepareRuntimeStreamOpen(message),
       };
       break;
     }

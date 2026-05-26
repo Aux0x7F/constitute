@@ -9,6 +9,7 @@ import {
 } from "constitute-ui/surface-app-contract";
 import { surfaceAppSelectionReadModel } from "constitute-ui/surface-selection-read-model";
 import { createRuntimeSurfaceClient } from "constitute-ui/runtime-surface-client";
+import { createRuntimeRunnerBridge } from "constitute-ui/runtime-runner-bridge";
 import {
   createSurfaceModuleRegistry,
 } from "constitute-ui/surface-module-registry";
@@ -37,6 +38,7 @@ export const accountSurfaceAppContract = assertSurfaceAppContract({
     SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
     SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
     SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
+    SURFACE_APP.MODULE_ROLE.RUNTIME_RUNNER_BRIDGE,
     SURFACE_APP.MODULE_ROLE.PRODUCT_VIEW,
   ],
   modules: [
@@ -73,6 +75,22 @@ export const accountSurfaceAppContract = assertSurfaceAppContract({
       primitiveRefs: ["runtime.shell.context"],
       inputs: ["browser.storage"],
       outputs: ["shell.context.evidence"],
+      issuedAt: ISSUED_AT,
+    },
+    {
+      moduleRef: "constitute-ui/runtime-runner-bridge@0.1.0",
+      role: SURFACE_APP.MODULE_ROLE.RUNTIME_RUNNER_BRIDGE,
+      participantSide: SURFACE_APP.PARTICIPANT_SIDE.WINDOW,
+      fulfillmentMode: SURFACE_APP.FULFILLMENT_MODE.BUNDLED,
+      version: "0.1.0",
+      primitiveRefs: [
+        "runtime.runner.dispatch",
+        "runner.runtime-dispatch.bridge",
+        "runtime.runner.host.fulfillment.put",
+      ],
+      inputs: ["runtime.runner.dispatch"],
+      outputs: ["runtime.runner.host.fulfillment.put"],
+      materializationBudgetRefs: ["account-ui.runtime-snapshot"],
       issuedAt: ISSUED_AT,
     },
     {
@@ -175,6 +193,7 @@ export const accountSurfaceAppManifest = assertSurfaceAppManifest({
     SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
     SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
     SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
+    SURFACE_APP.MODULE_ROLE.RUNTIME_RUNNER_BRIDGE,
     SURFACE_APP.MODULE_ROLE.PRODUCT_VIEW,
   ],
   bundledSourceRefs: ["bundle:account-ui@0.1.0"],
@@ -193,6 +212,7 @@ export const accountSurfaceAppManifest = assertSurfaceAppManifest({
         SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
         SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
         SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
+        SURFACE_APP.MODULE_ROLE.RUNTIME_RUNNER_BRIDGE,
         SURFACE_APP.MODULE_ROLE.PRODUCT_VIEW,
       ],
       compatibilityWindow: {
@@ -248,6 +268,17 @@ export const accountSurfaceModuleRegistry = createSurfaceModuleRegistry([
     implementation: Object.freeze({ browserStorageShellContext }),
   },
   {
+    moduleRef: "constitute-ui/runtime-runner-bridge@0.1.0",
+    role: SURFACE_APP.MODULE_ROLE.RUNTIME_RUNNER_BRIDGE,
+    version: "0.1.0",
+    primitiveRefs: [
+      "runtime.runner.dispatch",
+      "runner.runtime-dispatch.bridge",
+      "runtime.runner.host.fulfillment.put",
+    ],
+    implementation: Object.freeze({ createRuntimeRunnerBridge }),
+  },
+  {
     moduleRef: "constitute-account/account-view@0.1.0",
     role: SURFACE_APP.MODULE_ROLE.PRODUCT_VIEW,
     version: "0.1.0",
@@ -298,6 +329,11 @@ export const accountProjectionModelModule = accountSurfaceModuleRegistry.require
 export const accountPlatformAdapterModule = accountSurfaceModuleRegistry.require(
   accountSurfaceRuntimeSelectionPosture,
   SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
+).implementation;
+
+export const accountRuntimeRunnerBridgeModule = accountSurfaceModuleRegistry.require(
+  accountSurfaceRuntimeSelectionPosture,
+  SURFACE_APP.MODULE_ROLE.RUNTIME_RUNNER_BRIDGE,
 ).implementation;
 
 export const accountSurfaceAttachContext = accountSurfaceSelectionReadModel.attachContext;

@@ -238,6 +238,33 @@ test('swarm edge queue reject and repair status renders from snapshot', () => {
   );
 });
 
+test('swarm edge status prefers carrier edge posture when present', () => {
+  const snapshot = {
+    edge: {
+      mode: 'live',
+      connected: false,
+      queuedCount: 0,
+      sentCount: 3,
+      carrierEdge: {
+        kind: 'carrier.edge.session.evidence',
+        state: 'open',
+        connectionState: 'connected',
+        backpressureState: 'clear',
+        safeFacts: { mode: 'live' },
+      },
+    },
+  };
+  const view = buildRuntimeSnapshotView(snapshot);
+  const elements = runtimeElements();
+
+  renderRuntimeSnapshotView(elements, snapshot, fakeDocument());
+
+  assert.equal(view.edge.connected, true);
+  assert.equal(view.edge.carrierState, 'open');
+  assert.equal(view.edge.edgeLabel, 'carrier open');
+  assert.equal(elements.edgeStatusEl.textContent, 'carrier open');
+});
+
 test('active form input survives background runtime snapshot render', () => {
   const doc = fakeDocument();
   const activeInput = new FakeElement('input');
